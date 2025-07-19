@@ -1,0 +1,64 @@
+# Anti-Duplication Plugin Configuration
+# All values can be modified and reloaded with /antidupe reload
+
+# Scan settings
+scanning:
+  # Interval between each scan (in seconds)
+  interval: 5
+  # Number of chunks processed per batch
+  batch-size: 100
+  # Maximum timeout for a scan (in milliseconds)
+  timeout: 30000
+
+# UUID configuration
+uuid:
+  # Length of the generated UUID (8–36 characters)
+  length: 12
+  # Prefix to identify plugin UUIDs
+  prefix: "AD_"
+  # NBT tag used to store the UUID
+  nbt-tag: "AntiDupeUUID"
+
+# Logging
+logging:
+  # Enable JSON logging
+  enabled: true
+  # Directory for log storage
+  directory: "logs"
+  # Filename format (with date)
+  filename-format: "yyyy-MM-dd"
+  # Log level (DEBUG, INFO, WARN, ERROR)
+  level: "INFO"
+  # Automatic log rotation (in days)
+  rotation-days: 30
+
+# Redis (optional)
+redis:
+  # Enable Redis support
+  enabled: false
+  # Redis connection
+  host: "localhost"
+  port: 6379
+  password: ""
+  database: 0
+  # Redis key prefix
+  key-prefix: "antiduplication:"
+
+# Security
+security:
+  # Additional checks against exploits
+  strict-mode: true
+  # Block items without UUID in strict mode
+  block-no-uuid: false
+  # Monitor critical zones
+  monitor-creative: true
+  monitor-admin-commands: true
+
+# Performance
+performance:
+  # Thread pool size for async tasks
+  thread-pool-size: 2
+  # Enable result caching
+  cache-results: true
+  # Cache TTL (in seconds)
+  cache-ttl: 300
