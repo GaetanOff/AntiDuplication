@@ -40,6 +40,7 @@ public final class ItemManager {
     private final ConfigManager config;
     private final JsonLogger logger;
     private final UUIDGenerator uuidGenerator;
+    private final StackManager stackManager;
     private final Map<String, Set<TrackedItem>> itemRegistry;
     private final Map<String, Long> lastSeenCache;
 
@@ -53,6 +54,8 @@ public final class ItemManager {
         this.config = config;
         this.logger = logger;
         this.uuidGenerator = new UUIDGenerator(config.getUuidPrefix(), config.getUuidLength());
+        this.stackManager = new StackManager(plugin, config, this);
+
         this.itemRegistry = new ConcurrentHashMap<>();
         this.lastSeenCache = new ConcurrentHashMap<>();
         plugin.getLogger().info("ItemManager initialized with UUID " + config.getUuidPrefix() +
@@ -63,15 +66,32 @@ public final class ItemManager {
         if (itemStack == null || itemStack.getType() == Material.AIR) {
             return false;
         }
+
         if (this.hasValidUUID(itemStack)) {
             return false;
         }
-        final String uuid = this.uuidGenerator.generateUUID();
-        if (!NBTUtils.setNBTString(itemStack, this.config.getNbtTag(), uuid)) {
-            this.plugin.getLogger().warning("Unable to assign UUID to item " + itemStack.getType());
+
+        return this.assignBasicUUID(itemStack);
+    }
+
+    public boolean assignBasicUUID(final ItemStack itemStack) {
+        if (itemStack == null || itemStack.getType() == Material.AIR) {
             return false;
         }
+
+        if (this.hasValidUUID(itemStack)) {
+            return false;
+        }
+
+        final String uuid = this.uuidGenerator.generateUUID();
+
+        if (!NBTUtils.setNBTString(itemStack, this.config.getNbtTag(), uuid)) {
+            this.plugin.getLogger().warning("Unable to assign UUID to item" + itemStack.getType());
+            return false;
+        }
+
         this.totalItemsTracked.incrementAndGet();
+
         this.plugin.getLogger().fine("UUID assigned: " + uuid + " for " + itemStack.getType());
         return true;
     }
@@ -254,6 +274,10 @@ public final class ItemManager {
 
     public int getActiveRegistrySize() {
         return this.itemRegistry.size();
+    }
+
+    public StackManager getStackManager() {
+        return this.stackManager;
     }
 
     public Map<String, Integer> getRegistryStats() {

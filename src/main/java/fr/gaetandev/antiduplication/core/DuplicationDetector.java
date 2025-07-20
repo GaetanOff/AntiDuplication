@@ -119,26 +119,30 @@ public final class DuplicationDetector {
 
     private void scanPlayerInventory(final Player player, final Map<String, List<TrackedItem>> itemsByUuid) {
         final Inventory inventory = player.getInventory();
+
         for (int slot = 0; slot < inventory.getSize(); slot++) {
             final ItemStack item = inventory.getItem(slot);
             if (item == null) {
                 continue;
             }
-            final String uuid = this.itemManager.extractUUID(item);
-            if (uuid != null) {
-                final TrackedItem trackedItem = new TrackedItem.Builder()
-                        .uuid(uuid)
-                        .fromItemStack(item)
-                        .container("PLAYER_INVENTORY")
-                        .playerName(player.getName())
-                        .build();
-                itemsByUuid.computeIfAbsent(uuid, k -> new ArrayList<>()).add(trackedItem);
+
+            TrackedItem trackedItem = this.itemManager.getStackManager()
+                    .createTrackedItem(item, "PLAYER_INVENTORY", player.getName());
+
+            if (trackedItem != null) {
+                itemsByUuid.computeIfAbsent(trackedItem.getUuid(), k -> new ArrayList<>())
+                        .add(trackedItem);
                 this.lastScanItemCount++;
-            } else if (this.config.shouldBlockNoUuid() && this.config.isStrictMode()) {
-                // In strict mode, items missing UUIDs are assigned one and re-scanned recursively
+            } else {
                 if (this.itemManager.assignUUIDIfNeeded(item)) {
-                    this.scanPlayerInventory(player, itemsByUuid);
-                    return;
+                    trackedItem = this.itemManager.getStackManager()
+                            .createTrackedItem(item, "PLAYER_INVENTORY", player.getName());
+
+                    if (trackedItem != null) {
+                        itemsByUuid.computeIfAbsent(trackedItem.getUuid(), k -> new ArrayList<>())
+                                .add(trackedItem);
+                        this.lastScanItemCount++;
+                    }
                 }
             }
         }
