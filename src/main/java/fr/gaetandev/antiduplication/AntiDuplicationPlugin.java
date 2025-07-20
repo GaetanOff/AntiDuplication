@@ -61,16 +61,29 @@ public final class AntiDuplicationPlugin extends JavaPlugin {
     }
 
     private void initializePlugin() throws Exception {
-        this.configManager = new ConfigManager(this);
-        this.configManager.loadConfig();
-        this.jsonLogger = new JsonLogger(this, this.configManager);
-        this.itemManager = new ItemManager(this, this.configManager, this.jsonLogger);
-        this.threadManager = new ThreadManager(this, this.configManager, this.itemManager);
-        this.registerCommands();
-        this.registerListeners();
-        this.threadManager.startTasks();
-        this.threadManager.scheduleInitialScan();
-        this.pluginInitialized = true;
+        try {
+            this.configManager = new ConfigManager(this);
+            this.configManager.loadConfig();
+            this.jsonLogger = new JsonLogger(this, this.configManager);
+            this.itemManager = new ItemManager(this, this.configManager, this.jsonLogger);
+
+            this.threadManager = new ThreadManager(this, this.configManager, this.itemManager);
+
+            this.threadManager.initialize();
+
+            this.registerCommands();
+            this.registerListeners();
+
+            this.threadManager.startTasks();
+            this.threadManager.scheduleInitialScan();
+
+            this.pluginInitialized = true;
+            this.getLogger().info("Plugin initialization completed successfully");
+        } catch (final Exception e) {
+            this.getLogger().log(Level.SEVERE, "Error during plugin initialization", e);
+            this.pluginInitialized = false;
+            throw e;
+        }
     }
 
     private void registerCommands() {

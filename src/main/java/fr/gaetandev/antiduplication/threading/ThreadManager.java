@@ -40,6 +40,7 @@ public final class ThreadManager {
     private ScheduledFuture<?> scanTask;
     private ScheduledFuture<?> cleanupTask;
     private volatile boolean running = false;
+    private volatile boolean initialized = false;
 
     public ThreadManager(final AntiDuplicationPlugin plugin, final ConfigManager config, final ItemManager itemManager) {
         this.plugin = plugin;
@@ -71,11 +72,29 @@ public final class ThreadManager {
         plugin.getLogger().info("ThreadManager initialized with " + config.getThreadPoolSize() + " worker threads");
     }
 
-    public void startTasks() {
-        if (this.running) {
-            this.plugin.getLogger().warning("ThreadManager already running");
+    public void initialize() {
+        if (this.initialized) {
+            this.plugin.getLogger().warning("ThreadManager already initialized");
             return;
         }
+
+        this.detector.initialize();
+
+        this.initialized = true;
+        this.plugin.getLogger().info("ThreadManager initialized successfully");
+    }
+
+    public void startTasks() {
+        if (this.running) {
+            this.plugin.getLogger().warning("ThreadManager tasks already running");
+            return;
+        }
+
+        if (!this.initialized) {
+            this.plugin.getLogger().severe("Cannot start tasks: ThreadManager not initialized");
+            return;
+        }
+
         this.running = true;
         this.startScanTask();
         this.startCleanupTask();
