@@ -38,7 +38,7 @@ public final class DuplicationDetector {
     private final AntiDuplicationPlugin plugin;
     private final ConfigManager config;
     private final ItemManager itemManager;
-    private final ThreadManager threadManager;
+    private ThreadManager threadManager;
 
     // Avoid rescanning the same UUIDs too frequently; helps limit load in rapid-scan scenarios
     private final Map<String, Long> lastScanCache = new ConcurrentHashMap<>();
@@ -54,7 +54,14 @@ public final class DuplicationDetector {
         this.plugin = plugin;
         this.config = config;
         this.itemManager = itemManager;
-        this.threadManager = plugin.getThreadManager();
+    }
+
+    public void initialize() {
+        this.threadManager = this.plugin.getThreadManager();
+        if (this.threadManager == null) {
+            throw new IllegalStateException("ThreadManager is not available");
+        }
+        this.plugin.getLogger().info("DuplicationDetector initialized");
     }
 
     // Async full scan triggered manually or on timer
