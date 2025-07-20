@@ -20,6 +20,7 @@ import fr.gaetandev.antiduplication.AntiDuplicationPlugin;
 import fr.gaetandev.antiduplication.config.ConfigManager;
 import fr.gaetandev.antiduplication.model.DuplicationEvent;
 import fr.gaetandev.antiduplication.model.TrackedItem;
+import fr.gaetandev.antiduplication.threading.ThreadManager;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
 import org.bukkit.entity.Player;
@@ -37,6 +38,7 @@ public final class DuplicationDetector {
     private final AntiDuplicationPlugin plugin;
     private final ConfigManager config;
     private final ItemManager itemManager;
+    private final ThreadManager threadManager;
 
     // Avoid rescanning the same UUIDs too frequently; helps limit load in rapid-scan scenarios
     private final Map<String, Long> lastScanCache = new ConcurrentHashMap<>();
@@ -52,11 +54,12 @@ public final class DuplicationDetector {
         this.plugin = plugin;
         this.config = config;
         this.itemManager = itemManager;
+        this.threadManager = plugin.getThreadManager();
     }
 
     // Async full scan triggered manually or on timer
     public CompletableFuture<List<DuplicationEvent>> performFullScan() {
-        return this.plugin.getThreadManager().submitTask(() -> {
+        return this.threadManager.submitTask(() -> {
             final long startTime = System.currentTimeMillis();
             try {
                 this.plugin.getLogger().fine("Starting duplication scan...");
@@ -255,7 +258,7 @@ public final class DuplicationDetector {
     }
 
     public CompletableFuture<List<DuplicationEvent>> scanPlayer(final Player player) {
-        return CompletableFuture.supplyAsync(() -> {
+        return this.threadManager.submitTask(() -> {
             final Map<String, List<TrackedItem>> itemsByUuid = new ConcurrentHashMap<>();
             this.scanPlayerInventory(player, itemsByUuid);
             return this.findDuplications(itemsByUuid);
