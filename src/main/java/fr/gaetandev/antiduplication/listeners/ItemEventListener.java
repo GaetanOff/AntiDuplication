@@ -20,6 +20,7 @@ import fr.gaetandev.antiduplication.AntiDuplicationPlugin;
 import fr.gaetandev.antiduplication.config.ConfigManager;
 import fr.gaetandev.antiduplication.core.ItemManager;
 import org.bukkit.GameMode;
+import org.bukkit.Material;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
@@ -32,6 +33,8 @@ import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerPickupItemEvent;
 import org.bukkit.inventory.ItemStack;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.logging.Level;
 
 public final class ItemEventListener implements Listener {
@@ -39,6 +42,8 @@ public final class ItemEventListener implements Listener {
     private final AntiDuplicationPlugin plugin;
     private final ItemManager itemManager;
     private final ConfigManager config;
+
+    private final Map<String, StackInfo> playerStackCache = new HashMap<>();
 
     public ItemEventListener(final AntiDuplicationPlugin plugin, final ItemManager itemManager, final ConfigManager config) {
         this.plugin = plugin;
@@ -68,10 +73,12 @@ public final class ItemEventListener implements Listener {
         if (event.isCancelled()) {
             return;
         }
+
         try {
             final ItemStack result = event.getRecipe().getResult();
             if (result != null) {
                 this.itemManager.assignUUIDIfNeeded(result);
+
                 this.plugin.getLogger().finest("UUID assigned to crafted item: " + result.getType());
             }
         } catch (final Exception e) {
@@ -97,6 +104,7 @@ public final class ItemEventListener implements Listener {
         }
     }
 
+
     @EventHandler(priority = EventPriority.MONITOR)
     public void onItemDrop(final PlayerDropItemEvent event) {
         if (event.isCancelled()) {
@@ -114,7 +122,7 @@ public final class ItemEventListener implements Listener {
         }
     }
 
-    @EventHandler(priority = EventPriority.MONITOR)
+    @EventHandler(priority = EventPriority.HIGHEST)
     public void onInventoryClick(final InventoryClickEvent event) {
         if (event.isCancelled()) {
             return;
@@ -122,6 +130,9 @@ public final class ItemEventListener implements Listener {
         try {
             final ItemStack currentItem = event.getCurrentItem();
             final ItemStack cursor = event.getCursor();
+
+            this.detectStackDivision(event);
+
             if (currentItem != null) {
                 this.itemManager.assignUUIDIfNeeded(currentItem);
             }
@@ -133,6 +144,64 @@ public final class ItemEventListener implements Listener {
             }
         } catch (final Exception e) {
             this.plugin.getLogger().log(Level.WARNING, "Error during inventory click", e);
+        }
+    }
+
+    private void detectStackDivision(final InventoryClickEvent event) {
+        final ItemStack currentItem = event.getCurrentItem();
+        if (currentItem == null || currentItem.getType() == Material.AIR) {
+            return;
+        }
+
+        final String playerName = event.getWhoClicked().getName();
+
+        switch (event.getAction()) {
+            case PICKUP_HALF:
+            case PICKUP_SOME:
+            case PICKUP_ONE:
+                this.handleStackDivision(currentItem, playerName);
+                break;
+            case PLACE_SOME:
+            case PLACE_ONE:
+                this.handleStackPlacement(event.getCursor(), currentItem, playerName);
+                break;
+            default:
+                break;
+        }
+    }
+
+    private void handleStackDivision(final ItemStack originalStack, final String playerName) {
+        final String uuid = this.itemManager.extractUUID(originalStack);
+        if (uuid == null) {
+            return;
+        }
+        final int originalAmount = originalStack.getAmount();
+
+        this.itemManager.registerLegitimateStackDivision(uuid, originalAmount);
+
+        this.plugin.getLogger().fine(String.format(
+                "Division detected: %s divise %s x%d (UUID: %s)",
+                playerName, originalStack.getType(), originalAmount, uuid));
+    }
+
+    private void handleStackPlacement(final ItemStack cursor, final ItemStack target, final String playerName) {
+        if (cursor == null) {
+            return;
+        }
+        final String cursorUuid = this.itemManager.extractUUID(cursor);
+        if (cursorUuid == null) {
+            return;
+        }
+        if (target != null) {
+            final String targetUuid = this.itemManager.extractUUID(target);
+            if (cursorUuid.equals(targetUuid)) {
+                final int totalAmount = cursor.getAmount() + target.getAmount();
+                this.itemManager.registerLegitimateStackDivision(cursorUuid, totalAmount);
+
+                this.plugin.getLogger().fine(String.format(
+                        "Recombination detected: %s combine %s (total: %d, UUID: %s)",
+                        playerName, cursor.getType(), totalAmount, cursorUuid));
+            }
         }
     }
 
@@ -150,6 +219,7 @@ public final class ItemEventListener implements Listener {
             this.plugin.getLogger().log(Level.WARNING, "Error during inventory drag", e);
         }
     }
+
 
     private void checkSuspiciousPickup(final PlayerPickupItemEvent event) {
         final String playerName = event.getPlayer().getName();
@@ -180,5 +250,29 @@ public final class ItemEventListener implements Listener {
                             ", Item: " + (event.getCurrentItem() != null ? event.getCurrentItem().getType() : "null"));
         }
         // Other checks can be added here
+    }
+
+    private static class StackInfo {
+        private final String uuid;
+        private final int amount;
+        private final long timestamp;
+
+        public StackInfo(final String uuid, final int amount) {
+            this.uuid = uuid;
+            this.amount = amount;
+            this.timestamp = System.currentTimeMillis();
+        }
+
+        public String getUuid() {
+            return this.uuid;
+        }
+
+        public int getAmount() {
+            return this.amount;
+        }
+
+        public long getTimestamp() {
+            return this.timestamp;
+        }
     }
 }

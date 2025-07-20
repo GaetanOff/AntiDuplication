@@ -40,12 +40,26 @@ dependencies {
     implementation 'com.google.code.gson:gson:2.8.9'
     implementation 'redis.clients:jedis:4.2.3'
 
-    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.8.2'
+    testImplementation 'org.junit.jupiter:junit-jupiter-params:5.8.2'
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.8.2'
+
     testImplementation 'org.mockito:mockito-core:4.6.1'
+    testImplementation 'org.mockito:mockito-junit-jupiter:4.6.1'
+
     testImplementation 'org.spigotmc:spigot-api:1.8.8-R0.1-SNAPSHOT'
     testImplementation 'org.github.paperspigot:paperspigot-api:1.8.8-R0.1-SNAPSHOT'
     testImplementation 'org.bukkit:bukkit:1.8.8-R0.1-SNAPSHOT'
     testImplementation group: 'com.github.azbh111', name: 'craftbukkit-1.8.8', version: 'R'
+
+    testImplementation 'org.assertj:assertj-core:3.22.0'
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        events "passed", "skipped", "failed"
+    }
 }
 
 bukkit {

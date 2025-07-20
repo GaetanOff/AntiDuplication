@@ -19,18 +19,24 @@ package fr.gaetandev.antiduplication.model;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
-import org.junit.Test;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mockito;
+import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.time.Instant;
 
-import static org.junit.Assert.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.when;
 
+@ExtendWith(MockitoExtension.class)
 public class TrackedItemTest {
 
     @Test
-    public void testTrackedItemBuilder() {
+    @DisplayName("Test TrackedItem builder")
+    void testTrackedItemBuilder() {
         final String uuid = "TEST_12345678";
         final Material material = Material.DIAMOND;
         final int amount = 5;
@@ -43,13 +49,14 @@ public class TrackedItemTest {
                 .material(Material.STONE)
                 .build();
 
-        assertEquals("UUID should match", uuid, item.getUuid());
-        assertEquals("Container should match", "PLAYER_INVENTORY", item.getContainer());
-        assertEquals("PlayerName should match", "TestPlayer", item.getPlayerName());
+        assertThat(item.getUuid()).isEqualTo(uuid);
+        assertThat(item.getContainer()).isEqualTo("PLAYER_INVENTORY");
+        assertThat(item.getPlayerName()).isEqualTo("TestPlayer");
     }
 
     @Test
-    public void testGetLocationDescription() {
+    @DisplayName("Test location description generation")
+    void testGetLocationDescription() {
         final TrackedItem playerItem = new TrackedItem.Builder()
                 .uuid("TEST_12345678")
                 .material(Material.DIAMOND)
@@ -58,8 +65,7 @@ public class TrackedItemTest {
                 .build();
 
         final String desc = playerItem.getLocationDescription();
-        assertTrue("Description should contain player name", desc.contains("TestPlayer"));
-        assertTrue("Description should contain container type", desc.contains("PLAYER_INVENTORY"));
+        assertThat(desc).isEqualTo("Player TestPlayer (PLAYER_INVENTORY)");
 
         final World mockWorld = Mockito.mock(World.class);
         when(mockWorld.getName()).thenReturn("world");
@@ -73,12 +79,12 @@ public class TrackedItemTest {
                 .build();
 
         final String chestDesc = chestItem.getLocationDescription();
-        assertTrue("Description should contain coordinates", chestDesc.contains("100,64,200"));
-        assertTrue("Description should contain world name", chestDesc.contains("world"));
+        assertThat(chestDesc).isEqualTo("CHEST at 100,64,200 in world");
     }
 
     @Test
-    public void testGetItemDescription() {
+    @DisplayName("Test item description generation")
+    void testGetItemDescription() {
         final TrackedItem item = new TrackedItem.Builder()
                 .uuid("TEST_12345678")
                 .material(Material.DIAMOND_PICKAXE)
@@ -87,13 +93,12 @@ public class TrackedItemTest {
                 .build();
 
         final String desc = item.getItemDescription();
-        assertNotNull("Description should not be null", desc);
-        assertTrue("Description should contain material name", desc.contains("DIAMOND_PICKAXE"));
-        assertTrue("Description should contain durability", desc.contains("50"));
+        assertThat(desc).isEqualTo("DIAMOND_PICKAXE (durability: 50)");
     }
 
     @Test
-    public void testEqualsAndHashCode() {
+    @DisplayName("Test equals and hashCode methods")
+    void testEqualsAndHashCode() {
         final String uuid1 = "TEST_12345678";
         final String uuid2 = "TEST_87654321";
 
@@ -116,20 +121,24 @@ public class TrackedItemTest {
                 .container("TEST")
                 .build();
 
-        assertEquals("Items with the same UUID should be equal", item1a, item1b);
-        assertEquals("HashCode should be the same for the same UUID", item1a.hashCode(), item1b.hashCode());
-        assertNotEquals("Items with different UUIDs should not be equal", item1a, item2);
-    }
-
-    @Test(expected = NullPointerException.class)
-    public void testBuilderRequiredFields() {
-        new TrackedItem.Builder()
-                .container("TEST")
-                .build();
+        assertThat(item1a).isEqualTo(item1b);
+        assertThat(item1a.hashCode()).isEqualTo(item1b.hashCode());
+        assertThat(item1a).isNotEqualTo(item2);
     }
 
     @Test
-    public void testTimestamps() {
+    @DisplayName("Test required fields in builder")
+    void testBuilderRequiredFields() {
+        assertThrows(NullPointerException.class, () ->
+                new TrackedItem.Builder()
+                        .container("TEST")
+                        .build()
+        );
+    }
+
+    @Test
+    @DisplayName("Test timestamp management")
+    void testTimestamps() {
         final Instant before = Instant.now();
 
         final TrackedItem item = new TrackedItem.Builder()
@@ -140,9 +149,9 @@ public class TrackedItemTest {
 
         final Instant after = Instant.now();
 
-        assertNotNull("FirstSeen should not be null", item.getFirstSeen());
-        assertNotNull("LastSeen should not be null", item.getLastSeen());
-        assertTrue("FirstSeen should be after the start of the test", !item.getFirstSeen().isBefore(before));
-        assertTrue("LastSeen should be before the end of the test", !item.getLastSeen().isAfter(after));
+        assertThat(item.getFirstSeen()).isNotNull();
+        assertThat(item.getLastSeen()).isNotNull();
+        assertThat(item.getFirstSeen()).isAfterOrEqualTo(before);
+        assertThat(item.getLastSeen()).isBeforeOrEqualTo(after);
     }
 }

@@ -53,6 +53,10 @@ security:
   # Monitor critical zones
   monitor-creative: true
   monitor-admin-commands: true
+  # Tolerance for stack divisions (in seconds)
+  division-tolerance: 30
+  # Maximum number of divisions allowed per stack
+  max-divisions-per-stack: 4
 
 # Performance
 performance:
