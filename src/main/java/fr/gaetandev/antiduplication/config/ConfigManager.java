@@ -36,6 +36,8 @@ public final class ConfigManager {
     private String logLevel;
     private boolean redisEnabled;
     private boolean strictMode;
+    private int divisionTolerence;
+    private int maxDivisionPerStack;
     private int threadPoolSize;
     private boolean cacheResults;
     private long cacheTtl;
@@ -78,6 +80,8 @@ public final class ConfigManager {
 
         // Security
         this.strictMode = this.config.getBoolean("security.strict-mode", true);
+        this.divisionTolerence = Math.max(0, this.config.getInt("security.division-tolerance", 30));
+        this.maxDivisionPerStack = Math.max(0, this.config.getInt("security.max-divisions-per-stack", 0));
 
         // Performance
         this.threadPoolSize = Math.max(1, Math.min(8, this.config.getInt("performance.thread-pool-size", 2)));
@@ -187,6 +191,14 @@ public final class ConfigManager {
 
     public boolean shouldMonitorAdminCommands() {
         return this.config.getBoolean("security.monitor-admin-commands", true);
+    }
+
+    public int getMaxDivisionPerStack() {
+        return this.maxDivisionPerStack;
+    }
+
+    public int getDivisionTolerence() {
+        return this.divisionTolerence;
     }
 
     public int getThreadPoolSize() {

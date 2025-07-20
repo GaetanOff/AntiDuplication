@@ -44,6 +44,9 @@ public final class ItemManager {
     private final Map<String, Set<TrackedItem>> itemRegistry;
     private final Map<String, Long> lastSeenCache;
 
+    private final Map<String, Integer> legitimateDivisions;
+    private final Map<String, Long> divisionTimestamps;
+
     // Statistics
     private final AtomicLong totalItemsTracked = new AtomicLong(0);
     private final AtomicLong duplicationsDetected = new AtomicLong(0);
@@ -58,6 +61,8 @@ public final class ItemManager {
 
         this.itemRegistry = new ConcurrentHashMap<>();
         this.lastSeenCache = new ConcurrentHashMap<>();
+        this.legitimateDivisions = new ConcurrentHashMap<>();
+        this.divisionTimestamps = new ConcurrentHashMap<>();
         plugin.getLogger().info("ItemManager initialized with UUID " + config.getUuidPrefix() +
                 " (length: " + config.getUuidLength() + ")");
     }
@@ -109,6 +114,46 @@ public final class ItemManager {
         return uuid != null && this.uuidGenerator.isValidUUID(uuid);
     }
 
+    public void registerLegitimateStackDivision(final String originalUuid, final int totalAmount) {
+        this.legitimateDivisions.put(originalUuid, totalAmount);
+        this.divisionTimestamps.put(originalUuid, System.currentTimeMillis());
+
+        this.plugin.getLogger().fine(String.format(
+                "Division légitime enregistrée: UUID %s, quantité totale autorisée: %d",
+                originalUuid, totalAmount));
+    }
+
+    private boolean isLegitimateStackDivision(final String uuid, final List<TrackedItem> items) {
+        final Integer authorizedTotal = this.legitimateDivisions.get(uuid);
+        if (authorizedTotal == null) {
+            return false;
+        }
+
+        final int currentTotal = items.stream()
+                .mapToInt(TrackedItem::getAmount)
+                .sum();
+
+        final boolean isLegitimate = currentTotal <= authorizedTotal;
+
+        final Long divisionTime = this.divisionTimestamps.get(uuid);
+        final boolean isRecent = divisionTime != null &&
+                (System.currentTimeMillis() - divisionTime) < (this.config.getDivisionTolerence() * 1000L); // 30 secondes
+
+        if (isLegitimate && isRecent) {
+            this.plugin.getLogger().fine(String.format(
+                    "Legitimate stack division: UUID %s, %d/%d items",
+                    uuid, currentTotal, authorizedTotal));
+            return true;
+        }
+
+        if (!isRecent) {
+            this.legitimateDivisions.remove(uuid);
+            this.divisionTimestamps.remove(uuid);
+        }
+
+        return false;
+    }
+
     public void registerItem(final TrackedItem trackedItem) {
         final String uuid = trackedItem.getUuid();
         this.itemRegistry.computeIfAbsent(uuid, k -> ConcurrentHashMap.newKeySet()).add(trackedItem);
@@ -130,21 +175,30 @@ public final class ItemManager {
     public List<DuplicationEvent> detectDuplications() {
         final List<DuplicationEvent> events = new ArrayList<>();
         final long startTime = System.currentTimeMillis();
+
         for (final Map.Entry<String, Set<TrackedItem>> entry : this.itemRegistry.entrySet()) {
             final String uuid = entry.getKey();
             final Set<TrackedItem> items = entry.getValue();
+
             if (items.size() > 1) {
-                final DuplicationEvent event = new DuplicationEvent.Builder()
-                        .duplicatedUuid(uuid)
-                        .duplicatedItems(new ArrayList<>(items))
-                        .detectionMethod("registry_scan")
-                        .scanDurationMs(System.currentTimeMillis() - startTime)
-                        .build();
-                events.add(event);
-                this.duplicationsDetected.incrementAndGet();
-                this.plugin.getLogger().warning("Duplication detected: " + event.getSummary());
+                if (!this.isLegitimateStackDivision(uuid, new ArrayList<>(items))) {
+                    final DuplicationEvent event = new DuplicationEvent.Builder()
+                            .duplicatedUuid(uuid)
+                            .duplicatedItems(new ArrayList<>(items))
+                            .detectionMethod("registry_scan")
+                            .scanDurationMs(System.currentTimeMillis() - startTime)
+                            .build();
+
+                    events.add(event);
+                    this.duplicationsDetected.incrementAndGet();
+
+                    this.plugin.getLogger().warning("Duplication detected: " + event.getSummary());
+                } else {
+                    this.plugin.getLogger().fine("Legitimate division ignored for UUID: " + uuid);
+                }
             }
         }
+
         return events;
     }
 
@@ -255,7 +309,13 @@ public final class ItemManager {
      */
     public void cleanupOldItems() {
         final long cutoffTime = System.currentTimeMillis() - this.config.getCacheTtlMillis();
+
         this.lastSeenCache.entrySet().removeIf(entry -> entry.getValue() < cutoffTime);
+
+        final long divisionCutoff = System.currentTimeMillis() - 300000; // 5 minutes
+        this.divisionTimestamps.entrySet().removeIf(entry -> entry.getValue() < divisionCutoff);
+        this.legitimateDivisions.keySet().retainAll(this.divisionTimestamps.keySet());
+
         final Set<String> validUuids = new HashSet<>(this.lastSeenCache.keySet());
         this.itemRegistry.keySet().retainAll(validUuids);
     }

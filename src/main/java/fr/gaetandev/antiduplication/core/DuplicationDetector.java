@@ -181,14 +181,47 @@ public final class DuplicationDetector {
             if (items.size() > 1) {
                 final DuplicationEvent event = this.createDuplicationEvent(uuid, items);
                 duplications.add(event);
-                this.plugin.getLogger().warning(String.format(
-                        "Duplication found - UUID: %s, Copies: %d", uuid, items.size()));
-                for (final TrackedItem item : items) {
-                    this.plugin.getLogger().warning("  -> " + item.getLocationDescription());
+
+                if (!this.isLegitimateStackDivision(uuid, items)) {
+                    this.plugin.getLogger().warning(String.format(
+                            "Duplication found - UUID: %s, Copies: %d", uuid, items.size()));
+
+                    for (final TrackedItem item : items) {
+                        this.plugin.getLogger().warning("  -> " + item.getLocationDescription());
+                    }
+                } else {
+                    this.plugin.getLogger().fine(String.format(
+                            "Legitimate division ignored - UUID: %s, Parties: %d", uuid, items.size()));
+                    duplications.remove(duplications.size() - 1);
                 }
             }
         }
+
         return duplications;
+    }
+
+    private boolean isLegitimateStackDivision(final String uuid, final List<TrackedItem> items) {
+        if (items.size() <= this.config.getMaxDivisionPerStack()) {
+            final TrackedItem first = items.get(0);
+            final boolean sameType = items.stream()
+                    .allMatch(item -> item.getMaterial() == first.getMaterial());
+
+            if (sameType) {
+                final int totalAmount = items.stream()
+                        .mapToInt(TrackedItem::getAmount)
+                        .sum();
+
+                final int maxStackSize = first.getMaterial().getMaxStackSize();
+                if (totalAmount <= maxStackSize) {
+                    this.plugin.getLogger().fine(String.format(
+                            "Probable division detected: %s x%d into %d parts",
+                            first.getMaterial(), totalAmount, items.size()));
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     private DuplicationEvent createDuplicationEvent(final String uuid, final List<TrackedItem> duplicatedItems) {
