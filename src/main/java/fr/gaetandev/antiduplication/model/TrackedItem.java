@@ -19,6 +19,7 @@ package fr.gaetandev.antiduplication.model;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.ItemMeta;
 
 import java.time.Instant;
 import java.util.Objects;
@@ -191,8 +192,13 @@ public final class TrackedItem {
                 this.material = itemStack.getType();
                 this.amount = itemStack.getAmount();
                 this.durability = itemStack.getDurability();
-                if (itemStack.hasItemMeta() && itemStack.getItemMeta().hasDisplayName()) {
-                    this.displayName = itemStack.getItemMeta().getDisplayName();
+                if (itemStack.hasItemMeta()) {
+                    // getItemMeta() copies the item data every call, so it is read
+                    // once: this runs for every tracked item of every sweep.
+                    final ItemMeta meta = itemStack.getItemMeta();
+                    if (meta != null && meta.hasDisplayName()) {
+                        this.displayName = meta.getDisplayName();
+                    }
                 }
             }
             return this;

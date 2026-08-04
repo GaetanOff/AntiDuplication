@@ -24,6 +24,7 @@ import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.block.BlockState;
 import org.bukkit.block.Chest;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.Item;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
@@ -42,6 +43,13 @@ import java.util.UUID;
  * which is far worse than catching a duplicate one scan later.
  */
 public final class ItemRemover {
+
+    /**
+     * How far around its recorded position a dropped item is looked for. Wide
+     * enough to absorb the drift of one scan interval, narrow enough not to walk
+     * the whole world.
+     */
+    private static final double DROP_SEARCH_RADIUS = 12.0D;
 
     private final AntiDuplicationPlugin plugin;
     private final ItemManager itemManager;
@@ -208,18 +216,27 @@ public final class ItemRemover {
         }
     }
 
+    /**
+     * Looks for the recorded dropped item around where it was seen.
+     *
+     * <p>Bounded to a radius rather than sweeping every entity of the world: this
+     * runs once per reported ground copy, and a drop that drifted further than
+     * that is simply left for the next scan.
+     */
     private Item findDroppedEntity(final TrackedItem item) {
-        final World world = resolveWorld(item.getItemLocation().getBlockLocation());
+        final Location location = item.getItemLocation().getBlockLocation();
         final UUID entityId = item.getItemLocation().getHolderId();
-        if (world == null || entityId == null) {
+        if (resolveWorld(location) == null || entityId == null) {
             return null;
         }
 
-        for (final Item dropped : world.getEntitiesByClass(Item.class)) {
-            if (entityId.equals(dropped.getUniqueId()) && !dropped.isDead()
-                    && this.matches(dropped.getItemStack(), item.getUuid())) {
-                return dropped;
+        for (final Entity entity : location.getWorld().getNearbyEntities(
+                location, DROP_SEARCH_RADIUS, DROP_SEARCH_RADIUS, DROP_SEARCH_RADIUS)) {
+            if (!(entity instanceof Item) || !entityId.equals(entity.getUniqueId()) || entity.isDead()) {
+                continue;
             }
+            final Item dropped = (Item) entity;
+            return this.matches(dropped.getItemStack(), item.getUuid()) ? dropped : null;
         }
         return null;
     }
