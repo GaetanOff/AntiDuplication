@@ -186,9 +186,12 @@ files appendable and streamable. One line per event:
 ./gradlew build
 ```
 
-The shaded jar lands in `build/libs/AntiDuplication-<version>.jar`. Java 8 or
-later is required to build; the output targets Java 8 so it runs on legacy
-servers.
+The shaded jar lands in `build/libs/AntiDuplication-<version>.jar`. The output
+targets Java 8 so it runs on legacy servers.
+
+The wrapper pins Gradle 8.10, which supports JDK 8 through 22 — build with a JDK
+in that range. Newer JDKs need a newer Gradle, and moving to Gradle 9 also means
+moving to Shadow 9.x.
 
 ---
 
