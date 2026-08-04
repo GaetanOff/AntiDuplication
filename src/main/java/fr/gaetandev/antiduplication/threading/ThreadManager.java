@@ -77,8 +77,6 @@ public final class ThreadManager {
         this.config = config;
         this.itemManager = itemManager;
         this.redisRegistry = redisRegistry;
-        this.detector = new DuplicationDetector(plugin, config, itemManager, redisRegistry);
-        this.scannerTask = new ScannerTask(plugin, this);
 
         final AtomicInteger workerNumber = new AtomicInteger();
         this.executorService = Executors.newFixedThreadPool(config.getThreadPoolSize(), runnable -> {
@@ -88,6 +86,11 @@ public final class ThreadManager {
             thread.setPriority(Thread.NORM_PRIORITY - 1);
             return thread;
         });
+
+        // The detector needs the pool: its analysis stage is chained onto a future
+        // that completes on the main thread and must not run there.
+        this.detector = new DuplicationDetector(plugin, config, itemManager, redisRegistry, this.executorService);
+        this.scannerTask = new ScannerTask(plugin, this);
 
         plugin.getLogger().info("ThreadManager created with " + config.getThreadPoolSize() + " worker threads");
     }

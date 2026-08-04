@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 
@@ -51,6 +52,13 @@ public final class DuplicationDetector {
     private final InventoryScanner scanner;
     private final RedisRegistry redisRegistry;
 
+    /**
+     * The snapshot future is completed on the main thread, so the analysis stage
+     * must be handed to this executor explicitly; a plain thenApply would run the
+     * whole analysis, Redis round trips included, on the server thread.
+     */
+    private final Executor analysisExecutor;
+
     /** Guards against overlapping sweeps, whether scheduled or manual. */
     private final AtomicBoolean scanInProgress = new AtomicBoolean();
 
@@ -60,11 +68,13 @@ public final class DuplicationDetector {
     private volatile int lastScanDuplicationCount;
 
     public DuplicationDetector(final AntiDuplicationPlugin plugin, final ConfigManager config,
-                               final ItemManager itemManager, final RedisRegistry redisRegistry) {
+                               final ItemManager itemManager, final RedisRegistry redisRegistry,
+                               final Executor analysisExecutor) {
         this.plugin = plugin;
         this.config = config;
         this.itemManager = itemManager;
         this.redisRegistry = redisRegistry;
+        this.analysisExecutor = analysisExecutor;
         this.scanner = new InventoryScanner(plugin, config, itemManager, itemManager.getStackManager());
     }
 
@@ -81,7 +91,7 @@ public final class DuplicationDetector {
 
         this.lastScanStartedAt = System.currentTimeMillis();
         return this.scanner.scanServer()
-                .thenApply(snapshot -> this.analyse(snapshot, "full_scan"))
+                .thenApplyAsync(snapshot -> this.analyse(snapshot, "full_scan"), this.analysisExecutor)
                 .handle((events, throwable) -> {
                     this.scanInProgress.set(false);
                     if (throwable != null) {
@@ -98,7 +108,7 @@ public final class DuplicationDetector {
      */
     public CompletableFuture<List<DuplicationEvent>> scanPlayer(final Player player) {
         return this.scanner.scanPlayer(player)
-                .thenApply(snapshot -> this.analyse(snapshot, "player_scan"))
+                .thenApplyAsync(snapshot -> this.analyse(snapshot, "player_scan"), this.analysisExecutor)
                 .exceptionally(throwable -> {
                     this.plugin.getLogger().log(Level.SEVERE, "Error scanning " + player.getName(), throwable);
                     return Collections.emptyList();
