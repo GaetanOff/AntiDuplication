@@ -16,142 +16,124 @@
 
 package fr.gaetandev.antiduplication.model;
 
-import org.bukkit.Location;
 import org.bukkit.Material;
-import org.bukkit.World;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.Mockito;
-import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.time.Instant;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.Mockito.when;
 
-@ExtendWith(MockitoExtension.class)
-public class TrackedItemTest {
+class TrackedItemTest {
 
-    @Test
-    @DisplayName("Test TrackedItem builder")
-    void testTrackedItemBuilder() {
-        final String uuid = "TEST_12345678";
-        final Material material = Material.DIAMOND;
-        final int amount = 5;
+    private static final UUID PLAYER_ID = UUID.fromString("11111111-2222-3333-4444-555555555555");
 
-        final TrackedItem item = new TrackedItem.Builder()
+    private static TrackedItem.Builder playerItem(final String uuid, final int slot) {
+        return new TrackedItem.Builder()
                 .uuid(uuid)
-                .fromItemStack(null)
-                .container("PLAYER_INVENTORY")
-                .playerName("TestPlayer")
-                .material(Material.STONE)
-                .build();
+                .material(Material.DIAMOND_SWORD)
+                .location(ItemLocation.ofPlayer(
+                        ItemLocation.Kind.PLAYER_INVENTORY, PLAYER_ID, "TestPlayer", slot));
+    }
 
-        assertThat(item.getUuid()).isEqualTo(uuid);
-        assertThat(item.getContainer()).isEqualTo("PLAYER_INVENTORY");
+    @Test
+    @DisplayName("The builder exposes what the logs need")
+    void testBuilder() {
+        final TrackedItem item = playerItem("TEST_12345678", 3).amount(1).build();
+
+        assertThat(item.getUuid()).isEqualTo("TEST_12345678");
+        assertThat(item.getMaterial()).isEqualTo(Material.DIAMOND_SWORD);
         assertThat(item.getPlayerName()).isEqualTo("TestPlayer");
+        assertThat(item.getContainer()).isEqualTo("PLAYER_INVENTORY");
+        assertThat(item.getLocation()).isNull();
+        assertThat(item.getItemLocation().getSlot()).isEqualTo(3);
     }
 
     @Test
-    @DisplayName("Test location description generation")
-    void testGetLocationDescription() {
-        final TrackedItem playerItem = new TrackedItem.Builder()
-                .uuid("TEST_12345678")
-                .material(Material.DIAMOND)
-                .container("PLAYER_INVENTORY")
-                .playerName("TestPlayer")
-                .build();
-
-        final String desc = playerItem.getLocationDescription();
-        assertThat(desc).isEqualTo("Player TestPlayer (PLAYER_INVENTORY)");
-
-        final World mockWorld = Mockito.mock(World.class);
-        when(mockWorld.getName()).thenReturn("world");
-        final Location location = new Location(mockWorld, 100, 64, 200);
-
-        final TrackedItem chestItem = new TrackedItem.Builder()
-                .uuid("TEST_87654321")
-                .material(Material.CHEST)
-                .container("CHEST")
-                .location(location)
-                .build();
-
-        final String chestDesc = chestItem.getLocationDescription();
-        assertThat(chestDesc).isEqualTo("CHEST at 100,64,200 in world");
-    }
-
-    @Test
-    @DisplayName("Test item description generation")
-    void testGetItemDescription() {
+    @DisplayName("Container items report their block position, not a player")
+    void testContainerItem() {
         final TrackedItem item = new TrackedItem.Builder()
-                .uuid("TEST_12345678")
+                .uuid("TEST_87654321")
                 .material(Material.DIAMOND_PICKAXE)
+                .location(ItemLocation.ofContainer("CHEST", null, 7))
+                .build();
+
+        assertThat(item.getPlayerName()).isNull();
+        assertThat(item.getContainer()).isEqualTo("CHEST");
+        assertThat(item.getLocationDescription()).isEqualTo("CHEST at unknown position (slot 7)");
+    }
+
+    @Test
+    @DisplayName("Item descriptions mention amount, durability and name only when relevant")
+    void testItemDescription() {
+        assertThat(playerItem("TEST_12345678", 0).build().getItemDescription())
+                .isEqualTo("DIAMOND_SWORD");
+
+        assertThat(playerItem("TEST_12345678", 0)
+                .amount(3)
                 .durability((short) 50)
-                .container("TEST")
-                .build();
-
-        final String desc = item.getItemDescription();
-        assertThat(desc).isEqualTo("DIAMOND_PICKAXE (durability: 50)");
+                .displayName("Excalibur")
+                .build()
+                .getItemDescription())
+                .isEqualTo("DIAMOND_SWORD x3 (durability: 50) \"Excalibur\"");
     }
 
     @Test
-    @DisplayName("Test equals and hashCode methods")
-    void testEqualsAndHashCode() {
-        final String uuid1 = "TEST_12345678";
-        final String uuid2 = "TEST_87654321";
+    @DisplayName("Copies at different locations are distinct, which is what a duplication is")
+    void testEqualsIncludesLocation() {
+        final TrackedItem inSlotThree = playerItem("TEST_12345678", 3).build();
+        final TrackedItem sameSlot = playerItem("TEST_12345678", 3).amount(9).build();
+        final TrackedItem otherSlot = playerItem("TEST_12345678", 8).build();
+        final TrackedItem otherUuid = playerItem("TEST_87654321", 3).build();
 
-        final TrackedItem item1a = new TrackedItem.Builder()
-                .uuid(uuid1)
-                .material(Material.STONE)
-                .container("TEST")
-                .build();
-
-        final TrackedItem item1b = new TrackedItem.Builder()
-                .uuid(uuid1)
-                .material(Material.STONE)
-                .container("DIFFERENT")
-                .playerName("DifferentPlayer")
-                .build();
-
-        final TrackedItem item2 = new TrackedItem.Builder()
-                .uuid(uuid2)
-                .material(Material.DIRT)
-                .container("TEST")
-                .build();
-
-        assertThat(item1a).isEqualTo(item1b);
-        assertThat(item1a.hashCode()).isEqualTo(item1b.hashCode());
-        assertThat(item1a).isNotEqualTo(item2);
+        assertThat(inSlotThree).isEqualTo(sameSlot);
+        assertThat(inSlotThree.hashCode()).isEqualTo(sameSlot.hashCode());
+        assertThat(inSlotThree).isNotEqualTo(otherSlot);
+        assertThat(inSlotThree).isNotEqualTo(otherUuid);
     }
 
     @Test
-    @DisplayName("Test required fields in builder")
+    @DisplayName("Re-dating a copy keeps its identity")
+    void testWithFirstSeen() {
+        final TrackedItem item = playerItem("TEST_12345678", 3).build();
+        final Instant earlier = Instant.parse("2024-01-01T00:00:00Z");
+
+        final TrackedItem redated = item.withFirstSeen(earlier);
+
+        assertThat(redated.getFirstSeen()).isEqualTo(earlier);
+        assertThat(redated.getLastSeen()).isEqualTo(item.getLastSeen());
+        assertThat(redated).isEqualTo(item);
+    }
+
+    @Test
+    @DisplayName("UUID, material and location are all required")
     void testBuilderRequiredFields() {
-        assertThrows(NullPointerException.class, () ->
-                new TrackedItem.Builder()
-                        .container("TEST")
-                        .build()
-        );
+        assertThrows(NullPointerException.class, () -> new TrackedItem.Builder()
+                .material(Material.STONE)
+                .location(ItemLocation.ofContainer("CHEST", null, 0))
+                .build());
+
+        assertThrows(NullPointerException.class, () -> new TrackedItem.Builder()
+                .uuid("TEST_12345678")
+                .location(ItemLocation.ofContainer("CHEST", null, 0))
+                .build());
+
+        assertThrows(NullPointerException.class, () -> new TrackedItem.Builder()
+                .uuid("TEST_12345678")
+                .material(Material.STONE)
+                .build());
     }
 
     @Test
-    @DisplayName("Test timestamp management")
+    @DisplayName("Timestamps default to now")
     void testTimestamps() {
         final Instant before = Instant.now();
-
-        final TrackedItem item = new TrackedItem.Builder()
-                .uuid("TEST_12345678")
-                .material(Material.GOLD_INGOT)
-                .container("TEST")
-                .build();
-
+        final TrackedItem item = playerItem("TEST_12345678", 0).build();
         final Instant after = Instant.now();
 
-        assertThat(item.getFirstSeen()).isNotNull();
-        assertThat(item.getLastSeen()).isNotNull();
-        assertThat(item.getFirstSeen()).isAfterOrEqualTo(before);
-        assertThat(item.getLastSeen()).isBeforeOrEqualTo(after);
+        assertThat(item.getFirstSeen()).isBetween(before, after);
+        assertThat(item.getLastSeen()).isBetween(before, after);
     }
 }
