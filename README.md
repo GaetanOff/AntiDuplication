@@ -211,9 +211,9 @@ Please open an **issue** or submit a **pull request** on GitHub!
 
 ## **📬 Contact**
 
-📧 **contact@gaetandev.fr**
-🌍 **[Website](https://gaetandev.fr)**
-💬 **Discord: GaetanDev**
+📧 **contact@gaetandev.fr**  
+🌍 **[Website](https://gaetandev.fr)**  
+💬 **Discord: GaetanDev**  
 
 ---
 
