@@ -21,6 +21,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
@@ -135,6 +136,31 @@ class DuplicationEventTest {
 
         assertThat(event.getDuplicateCount()).isEqualTo(2);
         assertThrows(UnsupportedOperationException.class, () -> event.getDuplicatedItems().add(copyAt(4)));
+    }
+
+    @Test
+    @DisplayName("Narrowing keeps the finding but only the confirmed copies")
+    void testNarrowedTo() {
+        final List<TrackedItem> copies = copiesAt(1, 2, 3);
+        final DuplicationEvent event = new DuplicationEvent.Builder()
+                .duplicatedUuid(UUID_TAG)
+                .duplicatedItems(copies)
+                .retainedItem(copies.get(0))
+                .severity(DuplicationEvent.Severity.CRITICAL)
+                .detectionMethod("full_scan")
+                .additionalInfo("spread info")
+                .build();
+
+        final List<TrackedItem> confirmed = Arrays.asList(copies.get(1), copies.get(2));
+        final DuplicationEvent narrowed = event.narrowedTo(confirmed, copies.get(2));
+
+        assertThat(narrowed.getDuplicatedItems()).containsExactlyElementsOf(confirmed);
+        assertThat(narrowed.getRetainedItem()).isEqualTo(copies.get(2));
+        assertThat(narrowed.getItemsToRemove()).containsExactly(copies.get(1));
+        assertThat(narrowed.getSeverity()).isEqualTo(DuplicationEvent.Severity.CRITICAL);
+        assertThat(narrowed.getDetectionMethod()).isEqualTo("full_scan");
+        assertThat(narrowed.getAdditionalInfo()).isEqualTo("spread info");
+        assertThat(narrowed.getDetectionTime()).isEqualTo(event.getDetectionTime());
     }
 
     @Test

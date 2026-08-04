@@ -140,6 +140,25 @@ public final class DuplicationEvent {
         return this.duplicatedItems.size();
     }
 
+    /**
+     * Same finding restricted to the copies that were confirmed to exist.
+     *
+     * <p>Used after the pre-removal re-check, so the audit trail describes the
+     * copies actually acted upon rather than everything the sweep reported.
+     */
+    public DuplicationEvent narrowedTo(final List<TrackedItem> confirmedCopies, final TrackedItem retained) {
+        return new Builder()
+                .duplicatedUuid(this.duplicatedUuid)
+                .duplicatedItems(confirmedCopies)
+                .retainedItem(retained)
+                .detectionTime(this.detectionTime)
+                .severity(this.severity)
+                .detectionMethod(this.detectionMethod)
+                .scanDurationMs(this.scanDurationMs)
+                .additionalInfo(this.additionalInfo)
+                .build();
+    }
+
     public String getSummary() {
         return String.format("Duplication detected: UUID %s, %d copies, severity %s, %s",
                 this.duplicatedUuid, this.getDuplicateCount(), this.severity.getDescription(),

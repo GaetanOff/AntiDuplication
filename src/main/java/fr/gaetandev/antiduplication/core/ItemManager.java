@@ -181,15 +181,15 @@ public final class ItemManager {
             return 0;
         }
 
+        // The elected copy may itself have been a ghost, so re-elect among the
+        // survivors and carry on with a finding that matches reality.
         final TrackedItem retained = live.contains(event.getRetainedItem())
                 ? event.getRetainedItem() : live.get(0);
+        final DuplicationEvent confirmed = event.narrowedTo(live, retained);
 
         int removed = 0;
         int skipped = 0;
-        for (final TrackedItem copy : live) {
-            if (copy.equals(retained)) {
-                continue;
-            }
+        for (final TrackedItem copy : confirmed.getItemsToRemove()) {
             if (this.itemRemover.remove(copy).isRemoved()) {
                 removed++;
             } else {
@@ -202,18 +202,18 @@ public final class ItemManager {
 
         // Logged after the fact so the audit trail states what was really done
         // rather than what was intended.
-        this.logger.logDuplicationEvent(event, removed, skipped);
-        this.notifyAdministrators(event);
-        this.plugin.debug(event.getDetailedDescription());
+        this.logger.logDuplicationEvent(confirmed, removed, skipped);
+        this.notifyAdministrators(confirmed);
+        this.plugin.debug(confirmed.getDetailedDescription());
 
         // The retained copy keeps the UUID, so ownership is rewritten rather
         // than dropped; the division budget is reset since the stack is whole.
-        this.rememberOwner(event.getDuplicatedUuid(), event.getRetainedItem().getItemLocation().getOwnerKey());
-        this.divisionTracker.forget(event.getDuplicatedUuid());
+        this.rememberOwner(confirmed.getDuplicatedUuid(), retained.getItemLocation().getOwnerKey());
+        this.divisionTracker.forget(confirmed.getDuplicatedUuid());
 
         this.plugin.getLogger().warning(String.format(
                 "Duplication handled: UUID %s, %d copies removed, %d skipped, kept %s",
-                event.getDuplicatedUuid(), removed, skipped, retained.getLocationDescription()));
+                confirmed.getDuplicatedUuid(), removed, skipped, retained.getLocationDescription()));
         return removed;
     }
 
