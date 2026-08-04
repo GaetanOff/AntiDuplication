@@ -202,6 +202,11 @@ public final class InventoryScanner {
     }
 
     private void scanPlayer(final Player player, final ScanSnapshot.Builder builder) {
+        if (this.itemManager.isExempt(player)) {
+            this.plugin.debug(player.getName() + " holds antiduplication.bypass, inventory left untouched");
+            return;
+        }
+
         final UUID playerId = player.getUniqueId();
         final String playerName = player.getName();
 
@@ -347,7 +352,9 @@ public final class InventoryScanner {
                         stack.getType(), stack.getAmount(), location.describe()));
                 return StackOutcome.DELETE;
             }
-            uuid = this.itemManager.assignUUID(stack);
+            // The item was just read and carries nothing, so stamp directly
+            // instead of paying for a second item data lookup.
+            uuid = this.itemManager.stampFresh(stack);
             if (uuid == null) {
                 return outcome;
             }

@@ -31,11 +31,14 @@ import org.bukkit.event.inventory.InventoryAction;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCreativeEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
+import org.bukkit.event.inventory.InventoryMoveItemEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerPickupItemEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.PlayerInventory;
 
 import java.util.Set;
 import java.util.UUID;
@@ -99,6 +102,11 @@ public final class ItemEventListener implements Listener {
             if (this.itemManager.assignUUIDIfNeeded(stack)) {
                 event.getItem().setItemStack(stack);
             }
+            // A pickup that does not fit leaves part of the stack on the ground,
+            // and both halves keep the same UUID.
+            if (this.config.shouldTrackStackableItems()) {
+                this.registerDivision(stack, stack.getAmount());
+            }
             this.scheduleStampPass(event.getPlayer());
         } catch (final RuntimeException e) {
             this.plugin.getLogger().log(Level.WARNING, "Error handling an item pickup", e);
@@ -137,11 +145,67 @@ public final class ItemEventListener implements Listener {
         }
     }
 
+    /**
+     * A drag spreads the cursor stack over several slots without ever producing a
+     * click action, so the split has to be recorded here or the pieces would be
+     * reported as a duplication.
+     */
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onInventoryDrag(final InventoryDragEvent event) {
-        if (event.getWhoClicked() instanceof Player) {
-            this.scheduleStampPass((Player) event.getWhoClicked());
+        try {
+            if (this.config.shouldTrackStackableItems()) {
+                final ItemStack oldCursor = event.getOldCursor();
+                if (oldCursor != null) {
+                    this.registerDivision(oldCursor, oldCursor.getAmount());
+                }
+            }
+            if (event.getWhoClicked() instanceof Player) {
+                this.scheduleStampPass((Player) event.getWhoClicked());
+            }
+        } catch (final RuntimeException e) {
+            this.plugin.getLogger().log(Level.WARNING, "Error handling an inventory drag", e);
         }
+    }
+
+    /**
+     * Hoppers and droppers move items with no player involved, one or a few at a
+     * time out of a larger stack. The moved part and the remainder share a UUID,
+     * so the transfer is recorded as a split.
+     *
+     * <p>Returns immediately unless stackable tracking is on, because this event
+     * fires constantly on a server with hoppers.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onInventoryMoveItem(final InventoryMoveItemEvent event) {
+        if (!this.config.shouldTrackStackableItems()) {
+            return;
+        }
+        try {
+            final ItemStack moved = event.getItem();
+            final String uuid = this.itemManager.extractUUID(moved);
+            if (uuid == null) {
+                return;
+            }
+            this.itemManager.registerLegitimateStackDivision(uuid,
+                    moved.getAmount() + amountOf(event.getSource(), uuid));
+        } catch (final RuntimeException e) {
+            this.plugin.getLogger().log(Level.WARNING, "Error handling a container transfer", e);
+        }
+    }
+
+    /**
+     * @return how many items carrying {@code uuid} the inventory still holds
+     */
+    private int amountOf(final Inventory inventory, final String uuid) {
+        int total = 0;
+        final int size = inventory.getSize();
+        for (int slot = 0; slot < size; slot++) {
+            final ItemStack stack = inventory.getItem(slot);
+            if (stack != null && uuid.equals(this.itemManager.extractUUID(stack))) {
+                total += stack.getAmount();
+            }
+        }
+        return total;
     }
 
     /**
@@ -238,11 +302,11 @@ public final class ItemEventListener implements Listener {
      * Stamps every trackable item the player holds. Runs on the main thread.
      */
     private void stampInventory(final Player player) {
-        if (!player.isOnline()) {
+        if (!player.isOnline() || this.itemManager.isExempt(player)) {
             return;
         }
         try {
-            final org.bukkit.inventory.PlayerInventory inventory = player.getInventory();
+            final PlayerInventory inventory = player.getInventory();
             final int size = inventory.getSize();
             for (int slot = 0; slot < size; slot++) {
                 final ItemStack stack = inventory.getItem(slot);

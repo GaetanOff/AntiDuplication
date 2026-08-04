@@ -79,6 +79,14 @@ public final class ItemManager {
     }
 
     /**
+     * Players holding {@code antiduplication.bypass} are left entirely alone:
+     * their items are neither stamped, nor scanned, nor trimmed.
+     */
+    public boolean isExempt(final Player player) {
+        return player != null && player.hasPermission("antiduplication.bypass");
+    }
+
+    /**
      * Stamps a fresh UUID on an item that does not have one yet. Must be called
      * from the main thread, since it writes to a live stack.
      *
@@ -90,17 +98,7 @@ public final class ItemManager {
             return null;
         }
         final String existing = this.extractUUID(itemStack);
-        if (existing != null) {
-            return existing;
-        }
-
-        final String uuid = this.uuidGenerator.generateUUID();
-        if (!NBTUtils.setNBTString(itemStack, this.config.getNbtTag(), uuid)) {
-            this.plugin.getLogger().warning("Unable to stamp a UUID on " + itemStack.getType());
-            return null;
-        }
-        this.totalItemsTracked.incrementAndGet();
-        return uuid;
+        return existing != null ? existing : this.stampFresh(itemStack);
     }
 
     /**
@@ -110,7 +108,24 @@ public final class ItemManager {
         if (!this.stackManager.isTrackable(itemStack) || this.extractUUID(itemStack) != null) {
             return false;
         }
-        return this.assignUUID(itemStack) != null;
+        return this.stampFresh(itemStack) != null;
+    }
+
+    /**
+     * Writes a new UUID without checking for an existing one first.
+     *
+     * <p>Reserved for callers that have just read the item and know it carries no
+     * UUID; going through {@link #assignUUID(ItemStack)} would read the item data
+     * a second time, and that read is the expensive part of the sweep.
+     */
+    String stampFresh(final ItemStack itemStack) {
+        final String uuid = this.uuidGenerator.generateUUID();
+        if (!NBTUtils.setNBTString(itemStack, this.config.getNbtTag(), uuid)) {
+            this.plugin.getLogger().warning("Unable to stamp a UUID on " + itemStack.getType());
+            return null;
+        }
+        this.totalItemsTracked.incrementAndGet();
+        return uuid;
     }
 
     /**
