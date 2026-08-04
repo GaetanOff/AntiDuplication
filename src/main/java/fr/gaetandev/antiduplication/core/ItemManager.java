@@ -121,17 +121,6 @@ public final class ItemManager {
         return uuid != null && this.uuidGenerator.isValidUUID(uuid) ? uuid : null;
     }
 
-    public boolean hasValidUUID(final ItemStack itemStack) {
-        return this.extractUUID(itemStack) != null;
-    }
-
-    /**
-     * Clears the plugin tag, so the item can be re-stamped on the next sweep.
-     */
-    public boolean clearUUID(final ItemStack itemStack) {
-        return NBTUtils.removeNBTKey(itemStack, this.config.getNbtTag());
-    }
-
     /**
      * Records that a stack was legitimately split, so its pieces are not
      * reported as a duplication for the configured tolerance window.
@@ -156,11 +145,6 @@ public final class ItemManager {
     String knownOwner(final String uuid) {
         final OwnerRecord record = this.owners.get(uuid);
         return record != null ? record.ownerKey : null;
-    }
-
-    void forgetOwner(final String uuid) {
-        this.owners.remove(uuid);
-        this.divisionTracker.forget(uuid);
     }
 
     void countDetectedDuplication() {
@@ -189,9 +173,6 @@ public final class ItemManager {
     }
 
     private int applyDuplicationEvent(final DuplicationEvent event) {
-        this.logger.logDuplicationEvent(event);
-        this.notifyAdministrators(event);
-
         int removed = 0;
         int skipped = 0;
         for (final TrackedItem copy : event.getItemsToRemove()) {
@@ -204,6 +185,12 @@ public final class ItemManager {
 
         this.itemsRemoved.addAndGet(removed);
         this.removalsSkipped.addAndGet(skipped);
+
+        // Logged after the fact so the audit trail states what was really done
+        // rather than what was intended.
+        this.logger.logDuplicationEvent(event, removed, skipped);
+        this.notifyAdministrators(event);
+        this.plugin.debug(event.getDetailedDescription());
 
         // The retained copy keeps the UUID, so ownership is rewritten rather
         // than dropped; the division budget is reset since the stack is whole.
@@ -272,10 +259,6 @@ public final class ItemManager {
 
     public StackDivisionTracker getDivisionTracker() {
         return this.divisionTracker;
-    }
-
-    public UUIDGenerator getUuidGenerator() {
-        return this.uuidGenerator;
     }
 
     public String generateStatsReport() {

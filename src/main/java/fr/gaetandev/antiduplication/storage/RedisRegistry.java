@@ -199,27 +199,6 @@ public final class RedisRegistry {
         return foreign;
     }
 
-    /**
-     * Drops a claim, so a removed copy does not keep the UUID reserved.
-     */
-    public void release(final Collection<String> uuids) {
-        if (!this.isAvailable() || uuids.isEmpty()) {
-            return;
-        }
-        try (Jedis jedis = this.pool.getResource()) {
-            for (final List<String> batch : partition(uuids)) {
-                final Pipeline pipeline = jedis.pipelined();
-                for (final String uuid : batch) {
-                    pipeline.del(this.key(uuid));
-                }
-                pipeline.sync();
-            }
-            this.consecutiveFailures.set(0);
-        } catch (final RuntimeException e) {
-            this.recordFailure(e);
-        }
-    }
-
     private void recordFailure(final RuntimeException error) {
         final int failures = this.consecutiveFailures.incrementAndGet();
         this.plugin.getLogger().log(Level.WARNING,

@@ -156,8 +156,15 @@ public final class AntiDuplicationPlugin extends JavaPlugin {
 
     /**
      * Sends a message to every online administrator.
+     *
+     * <p>Safe to call from any thread: the player list is only ever walked on the
+     * main thread.
      */
     public void notifyAdmins(final String message) {
+        if (!this.getServer().isPrimaryThread()) {
+            this.getServer().getScheduler().runTask(this, () -> this.notifyAdmins(message));
+            return;
+        }
         for (final Player online : this.getServer().getOnlinePlayers()) {
             if (online.hasPermission("antiduplication.admin")) {
                 online.sendMessage(message);

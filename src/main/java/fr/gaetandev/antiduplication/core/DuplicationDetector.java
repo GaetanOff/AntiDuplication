@@ -47,7 +47,6 @@ import java.util.logging.Level;
 public final class DuplicationDetector {
 
     private final AntiDuplicationPlugin plugin;
-    private final ConfigManager config;
     private final ItemManager itemManager;
     private final InventoryScanner scanner;
     private final RedisRegistry redisRegistry;
@@ -62,7 +61,6 @@ public final class DuplicationDetector {
     /** Guards against overlapping sweeps, whether scheduled or manual. */
     private final AtomicBoolean scanInProgress = new AtomicBoolean();
 
-    private volatile long lastScanStartedAt;
     private volatile long lastScanDuration;
     private volatile int lastScanItemCount;
     private volatile int lastScanDuplicationCount;
@@ -71,7 +69,6 @@ public final class DuplicationDetector {
                                final ItemManager itemManager, final RedisRegistry redisRegistry,
                                final Executor analysisExecutor) {
         this.plugin = plugin;
-        this.config = config;
         this.itemManager = itemManager;
         this.redisRegistry = redisRegistry;
         this.analysisExecutor = analysisExecutor;
@@ -89,7 +86,6 @@ public final class DuplicationDetector {
             return CompletableFuture.completedFuture(Collections.<DuplicationEvent>emptyList());
         }
 
-        this.lastScanStartedAt = System.currentTimeMillis();
         return this.scanner.scanServer()
                 .thenApplyAsync(snapshot -> this.analyse(snapshot, "full_scan"), this.analysisExecutor)
                 .handle((events, throwable) -> {
@@ -128,36 +124,50 @@ public final class DuplicationDetector {
             final String uuid = entry.getKey();
             final List<TrackedItem> copies = entry.getValue();
 
-            if (copies.size() == 1 && !foreignDuplicates.contains(uuid)) {
-                this.itemManager.rememberOwner(uuid, copies.get(0).getItemLocation().getOwnerKey());
-                continue;
-            }
-            if (copies.size() > 1 && this.itemManager.getDivisionTracker().isLegitimate(uuid, copies)) {
-                this.plugin.getLogger().fine(String.format(
-                        "Legitimate stack division ignored: UUID %s split in %d", uuid, copies.size()));
-                continue;
-            }
-            if (copies.size() == 1) {
-                // Seen once here but also on another server of the network.
-                this.plugin.getLogger().warning(String.format(
-                        "UUID %s is also present on another server of the network", uuid));
-                this.itemManager.rememberOwner(uuid, copies.get(0).getItemLocation().getOwnerKey());
+            if (copies.size() > 1) {
+                if (this.itemManager.getDivisionTracker().isLegitimate(uuid, copies)) {
+                    this.plugin.debug(String.format(
+                            "Legitimate stack division ignored: UUID %s split in %d", uuid, copies.size()));
+                    continue;
+                }
+                events.add(this.buildEvent(uuid, copies, method, snapshot.getDurationMs()));
+                this.itemManager.countDetectedDuplication();
                 continue;
             }
 
-            events.add(this.buildEvent(uuid, copies, method, snapshot.getDurationMs()));
-            this.itemManager.countDetectedDuplication();
+            // A single local copy is normal, unless another server of the network
+            // reports holding the same UUID. Nothing can be removed in that case:
+            // the other copy is out of reach, so it is reported for an operator.
+            if (foreignDuplicates.contains(uuid)) {
+                this.reportForeignDuplicate(uuid, copies.get(0));
+            }
+            this.itemManager.rememberOwner(uuid, copies.get(0).getItemLocation().getOwnerKey());
         }
 
         this.lastScanDuration = snapshot.getDurationMs();
         this.lastScanItemCount = snapshot.getItemsScanned();
         this.lastScanDuplicationCount = events.size();
 
-        this.plugin.getLogger().fine(String.format(
-                "Scan analysed in %dms: %d items, %d UUIDs assigned, %d duplications, %d oversized stacks%s",
+        this.plugin.debug(String.format(
+                "Scan analysed in %dms: %d items, %d UUIDs assigned, %d duplications, "
+                        + "%d oversized stacks, %d untagged rejected%s",
                 System.currentTimeMillis() - startedAt, snapshot.getItemsScanned(), snapshot.getUuidsAssigned(),
-                events.size(), snapshot.getOversizedStacks(), snapshot.isTruncated() ? " (partial scan)" : ""));
+                events.size(), snapshot.getOversizedStacks(), snapshot.getUntaggedRejected(),
+                snapshot.isTruncated() ? " (partial scan)" : ""));
         return events;
+    }
+
+    private void reportForeignDuplicate(final String uuid, final TrackedItem localCopy) {
+        this.plugin.getLogger().warning(String.format(
+                "UUID %s is also held by another server of the network: %s at %s",
+                uuid, localCopy.getItemDescription(), localCopy.getLocationDescription()));
+        this.plugin.getJsonLogger().logEvent("cross_server_duplication", String.format(
+                "UUID: %s, Item: %s, Location: %s, Server: %s",
+                uuid, localCopy.getItemDescription(), localCopy.getLocationDescription(),
+                this.redisRegistry.getServerId()));
+        this.plugin.notifyAdmins(String.format(
+                "§c[AntiDupe] %s also exists on another server (%s)",
+                localCopy.getItemDescription(), uuid));
     }
 
     /**
@@ -283,20 +293,8 @@ public final class DuplicationDetector {
         return info.toString().trim();
     }
 
-    /**
-     * @return {@code true} when the previous scan is recent enough that another
-     *         one would be wasted effort
-     */
-    public boolean isRecentScanAvailable() {
-        return System.currentTimeMillis() - this.lastScanStartedAt < this.config.getScanIntervalMillis() / 2;
-    }
-
     public boolean isScanInProgress() {
         return this.scanInProgress.get();
-    }
-
-    public long getLastScanDuration() {
-        return this.lastScanDuration;
     }
 
     public int getLastScanItemCount() {

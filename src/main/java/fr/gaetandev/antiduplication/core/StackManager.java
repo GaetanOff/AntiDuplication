@@ -107,10 +107,6 @@ public final class StackManager {
         return properties != null ? properties.getMaxStackSize() : safeMaxStackSize(material);
     }
 
-    public boolean isStackable(final Material material) {
-        return this.getMaxStackSize(material) > 1;
-    }
-
     public boolean isValuable(final Material material) {
         final StackProperties properties = this.stackProperties.get(material);
         return properties != null ? properties.isValuable() : isValuableMaterial(material);

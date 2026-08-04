@@ -229,25 +229,6 @@ public final class ThreadManager {
         }
     }
 
-    /**
-     * Submits work to the plugin's worker pool.
-     */
-    public <T> CompletableFuture<T> submitTask(final Callable<T> task) {
-        final CompletableFuture<T> future = new CompletableFuture<>();
-        try {
-            this.executorService.execute(() -> {
-                try {
-                    future.complete(task.call());
-                } catch (final Exception e) {
-                    future.completeExceptionally(e);
-                }
-            });
-        } catch (final RuntimeException e) {
-            future.completeExceptionally(e);
-        }
-        return future;
-    }
-
     public void runOnMainThread(final Runnable task) {
         if (Bukkit.isPrimaryThread()) {
             task.run();
@@ -289,10 +270,6 @@ public final class ThreadManager {
 
     public RedisRegistry getRedisRegistry() {
         return this.redisRegistry;
-    }
-
-    public boolean isRunning() {
-        return this.running;
     }
 
     public String getThreadStats() {

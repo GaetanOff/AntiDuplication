@@ -222,10 +222,6 @@ public final class ConfigManager {
         return this.logDirectory;
     }
 
-    public String getLogLevel() {
-        return this.logLevel;
-    }
-
     public boolean isDebugEnabled() {
         return "DEBUG".equals(this.logLevel);
     }
@@ -326,15 +322,7 @@ public final class ConfigManager {
         return this.cacheResults;
     }
 
-    public long getCacheTtl() {
-        return this.cacheTtl;
-    }
-
     public long getCacheTtlMillis() {
         return TimeUnit.SECONDS.toMillis(this.cacheTtl);
-    }
-
-    public FileConfiguration getRawConfig() {
-        return this.config;
     }
 }

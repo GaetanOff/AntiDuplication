@@ -28,11 +28,14 @@ import java.util.Objects;
  */
 public final class DuplicationEvent {
 
+    /**
+     * What the plugin ended up doing about a duplication. Decided after the
+     * removal pass, not when the event is created, so the audit trail cannot
+     * claim a removal that did not happen.
+     */
     public enum Action {
         ITEMS_REMOVED("Duplicated copies removed"),
-        WARNING_LOGGED("Warning logged"),
-        PLAYERS_NOTIFIED("Players notified"),
-        ADMIN_ALERTED("Administrators alerted");
+        WARNING_LOGGED("Warning logged, no copy could be removed");
 
         private final String description;
 
@@ -66,7 +69,6 @@ public final class DuplicationEvent {
     private final List<TrackedItem> duplicatedItems;
     private final TrackedItem retainedItem;
     private final Instant detectionTime;
-    private final Action actionTaken;
     private final Severity severity;
     private final String detectionMethod;
     private final long scanDurationMs;
@@ -77,7 +79,6 @@ public final class DuplicationEvent {
         this.duplicatedItems = Collections.unmodifiableList(new ArrayList<>(builder.duplicatedItems));
         this.retainedItem = builder.retainedItem;
         this.detectionTime = builder.detectionTime;
-        this.actionTaken = builder.actionTaken;
         this.severity = builder.severity;
         this.detectionMethod = builder.detectionMethod;
         this.scanDurationMs = builder.scanDurationMs;
@@ -119,10 +120,6 @@ public final class DuplicationEvent {
         return this.detectionTime;
     }
 
-    public Action getActionTaken() {
-        return this.actionTaken;
-    }
-
     public Severity getSeverity() {
         return this.severity;
     }
@@ -144,9 +141,9 @@ public final class DuplicationEvent {
     }
 
     public String getSummary() {
-        return String.format("Duplication detected: UUID %s (%d copies, %s) - %s",
-                this.duplicatedUuid, this.getDuplicateCount(),
-                this.severity.getDescription(), this.actionTaken.getDescription());
+        return String.format("Duplication detected: UUID %s, %d copies, severity %s, %s",
+                this.duplicatedUuid, this.getDuplicateCount(), this.severity.getDescription(),
+                this.retainedItem.getItemDescription());
     }
 
     public String getDetailedDescription() {
@@ -156,7 +153,6 @@ public final class DuplicationEvent {
         desc.append("  Copies: ").append(this.getDuplicateCount()).append("\n");
         desc.append("  Severity: ").append(this.severity.getDescription()).append("\n");
         desc.append("  Method: ").append(this.detectionMethod).append("\n");
-        desc.append("  Action: ").append(this.actionTaken.getDescription()).append("\n");
         desc.append("  Locations:\n");
         for (int i = 0; i < this.duplicatedItems.size(); i++) {
             final TrackedItem item = this.duplicatedItems.get(i);
@@ -199,7 +195,6 @@ public final class DuplicationEvent {
         private List<TrackedItem> duplicatedItems;
         private TrackedItem retainedItem;
         private Instant detectionTime = Instant.now();
-        private Action actionTaken = Action.ITEMS_REMOVED;
         private Severity severity;
         private String detectionMethod = "automatic_scan";
         private long scanDurationMs = 0;
@@ -222,11 +217,6 @@ public final class DuplicationEvent {
 
         public Builder detectionTime(final Instant time) {
             this.detectionTime = time;
-            return this;
-        }
-
-        public Builder actionTaken(final Action action) {
-            this.actionTaken = action;
             return this;
         }
 

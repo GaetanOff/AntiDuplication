@@ -94,37 +94,9 @@ public final class ScannerTask implements Runnable {
         return true;
     }
 
-    public long getLastRunTime() {
-        return this.lastRunTime.get();
-    }
-
-    public int getTotalScansPerformed() {
-        return this.scansPerformed.get();
-    }
-
-    public int getTotalScansSkipped() {
-        return this.scansSkipped.get();
-    }
-
-    public int getTotalDuplicationsFound() {
-        return this.duplicationsFound.get();
-    }
-
-    public int getTotalCopiesRemoved() {
-        return this.copiesRemoved.get();
-    }
-
     public String getPerformanceReport() {
         return String.format("Scans: %d (%d skipped), duplications: %d, copies removed: %d, last run: %dms",
                 this.scansPerformed.get(), this.scansSkipped.get(),
                 this.duplicationsFound.get(), this.copiesRemoved.get(), this.lastRunTime.get());
-    }
-
-    public void resetStats() {
-        this.scansPerformed.set(0);
-        this.scansSkipped.set(0);
-        this.duplicationsFound.set(0);
-        this.copiesRemoved.set(0);
-        this.lastRunTime.set(0);
     }
 }

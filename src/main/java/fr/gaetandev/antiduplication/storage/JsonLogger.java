@@ -120,12 +120,19 @@ public final class JsonLogger {
         }
     }
 
-    public void logDuplicationEvent(final DuplicationEvent event) {
+    /**
+     * Records a duplication together with what was actually done about it.
+     *
+     * @param removed copies deleted
+     * @param skipped copies that had moved and were left for the next scan
+     */
+    public void logDuplicationEvent(final DuplicationEvent event, final int removed, final int skipped) {
         if (!this.config.isLoggingEnabled()) {
             return;
         }
         try {
-            this.enqueue(new LogEntry(this.createDuplicationJson(event), event.getDetectionTime()));
+            this.enqueue(new LogEntry(this.createDuplicationJson(event, removed, skipped),
+                    event.getDetectionTime()));
         } catch (final RuntimeException e) {
             this.plugin.getLogger().log(Level.SEVERE, "Error building the duplication log entry", e);
         }
@@ -161,14 +168,17 @@ public final class JsonLogger {
         }
     }
 
-    private JsonObject createDuplicationJson(final DuplicationEvent event) {
+    private JsonObject createDuplicationJson(final DuplicationEvent event, final int removed, final int skipped) {
         final JsonObject json = new JsonObject();
         json.addProperty("event_type", "item_duplication");
         json.addProperty("timestamp", this.timestampFormatter.format(event.getDetectionTime()));
         json.addProperty("uuid", event.getDuplicatedUuid());
         json.addProperty("duplicate_count", event.getDuplicateCount());
         json.addProperty("severity", event.getSeverity().name());
-        json.addProperty("action_taken", event.getActionTaken().name());
+        json.addProperty("action_taken", (removed > 0
+                ? DuplicationEvent.Action.ITEMS_REMOVED : DuplicationEvent.Action.WARNING_LOGGED).name());
+        json.addProperty("copies_removed", removed);
+        json.addProperty("copies_skipped", skipped);
         json.addProperty("detection_method", event.getDetectionMethod());
         json.addProperty("scan_duration_ms", event.getScanDurationMs());
 

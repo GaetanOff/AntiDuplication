@@ -94,10 +94,6 @@ public final class ScanSnapshot {
         return this.truncated;
     }
 
-    public static ScanSnapshot empty() {
-        return new Builder().build();
-    }
-
     static final class Builder {
         private final Map<String, List<TrackedItem>> itemsByUuid = new HashMap<>();
         private int itemsScanned;
