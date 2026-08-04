@@ -139,13 +139,37 @@ public final class ItemLocation {
         }
     }
 
+    /**
+     * World name of this location, or {@code null} when there is none to report.
+     *
+     * <p>{@link Location#getWorld()} throws once the world has been unloaded on
+     * modern servers, which would otherwise propagate out of {@code equals} or a
+     * log call — places that must never fail.
+     */
+    public String getWorldName() {
+        if (this.blockLocation == null) {
+            return null;
+        }
+        try {
+            final org.bukkit.World world = this.blockLocation.getWorld();
+            return world != null ? world.getName() : null;
+        } catch (final RuntimeException e) {
+            return null;
+        }
+    }
+
     private static String describeBlock(final Location location) {
         if (location == null) {
             return "unknown position";
         }
-        final String world = location.getWorld() != null ? location.getWorld().getName() : "unknown world";
-        return String.format("%d,%d,%d in %s",
-                location.getBlockX(), location.getBlockY(), location.getBlockZ(), world);
+        String world;
+        try {
+            world = location.getWorld() != null ? location.getWorld().getName() : null;
+        } catch (final RuntimeException e) {
+            world = null;
+        }
+        return String.format("%d,%d,%d in %s", location.getBlockX(), location.getBlockY(),
+                location.getBlockZ(), world != null ? world : "unknown world");
     }
 
     @Override

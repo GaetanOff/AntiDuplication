@@ -228,9 +228,9 @@ public final class JsonLogger {
         if (location.getHolderId() != null) {
             json.addProperty("holder_id", location.getHolderId().toString());
         }
-        if (location.getBlockLocation() != null && location.getBlockLocation().getWorld() != null) {
+        if (location.getBlockLocation() != null) {
             final JsonObject locationJson = new JsonObject();
-            locationJson.addProperty("world", location.getBlockLocation().getWorld().getName());
+            locationJson.addProperty("world", location.getWorldName());
             locationJson.addProperty("x", location.getBlockLocation().getBlockX());
             locationJson.addProperty("y", location.getBlockLocation().getBlockY());
             locationJson.addProperty("z", location.getBlockLocation().getBlockZ());

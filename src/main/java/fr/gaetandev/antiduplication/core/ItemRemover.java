@@ -21,6 +21,7 @@ import fr.gaetandev.antiduplication.model.ItemLocation;
 import fr.gaetandev.antiduplication.model.TrackedItem;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.World;
 import org.bukkit.block.BlockState;
 import org.bukkit.block.Chest;
 import org.bukkit.entity.Item;
@@ -175,10 +176,11 @@ public final class ItemRemover {
     }
 
     private static Inventory resolveContainerInventory(final Location blockLocation) {
-        if (blockLocation == null || blockLocation.getWorld() == null) {
+        final World world = resolveWorld(blockLocation);
+        if (world == null) {
             return null;
         }
-        if (!blockLocation.getWorld().isChunkLoaded(blockLocation.getBlockX() >> 4, blockLocation.getBlockZ() >> 4)) {
+        if (!world.isChunkLoaded(blockLocation.getBlockX() >> 4, blockLocation.getBlockZ() >> 4)) {
             return null;
         }
 
@@ -191,14 +193,29 @@ public final class ItemRemover {
         return state instanceof InventoryHolder ? ((InventoryHolder) state).getInventory() : null;
     }
 
+    /**
+     * @return the world of this location, or {@code null} when it is gone;
+     *         {@link Location#getWorld()} throws on an unloaded world
+     */
+    private static World resolveWorld(final Location location) {
+        if (location == null) {
+            return null;
+        }
+        try {
+            return location.getWorld();
+        } catch (final RuntimeException e) {
+            return null;
+        }
+    }
+
     private Item findDroppedEntity(final TrackedItem item) {
-        final Location location = item.getItemLocation().getBlockLocation();
+        final World world = resolveWorld(item.getItemLocation().getBlockLocation());
         final UUID entityId = item.getItemLocation().getHolderId();
-        if (location == null || location.getWorld() == null || entityId == null) {
+        if (world == null || entityId == null) {
             return null;
         }
 
-        for (final Item dropped : location.getWorld().getEntitiesByClass(Item.class)) {
+        for (final Item dropped : world.getEntitiesByClass(Item.class)) {
             if (entityId.equals(dropped.getUniqueId()) && !dropped.isDead()
                     && this.matches(dropped.getItemStack(), item.getUuid())) {
                 return dropped;
