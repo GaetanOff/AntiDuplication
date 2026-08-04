@@ -307,25 +307,35 @@ public final class InventoryScanner {
      */
     private StackOutcome handleStack(final ItemStack stack, final ScanSnapshot.Builder builder,
                                      final ItemLocation location) {
-        // Cheap material test first: on a typical server the vast majority of
-        // stacks are not tracked at all, and skipping them here avoids any item
-        // data lookup on the main thread.
-        if (stack == null || stack.getType() == Material.AIR || !this.stackManager.isTrackable(stack)) {
+        if (stack == null || stack.getType() == Material.AIR) {
             return StackOutcome.UNCHANGED;
         }
 
         StackOutcome outcome = StackOutcome.UNCHANGED;
 
+        // Checked on every item, tracked or not: a stack above the legal size is a
+        // duplication symptom in its own right, and it is precisely the stackable
+        // items left out of UUID tracking that it shows up on.
         final int legalSize = this.stackManager.getOversizedExcess(stack);
         if (legalSize >= 0) {
             builder.countOversizedStack();
             this.plugin.getLogger().warning(String.format(
                     "Oversized stack: %s x%d (max %d) at %s",
                     stack.getType(), stack.getAmount(), legalSize, location.describe()));
+            this.plugin.getJsonLogger().logEvent("oversized_stack", String.format(
+                    "Item: %s x%d, Max: %d, Location: %s, Trimmed: %s",
+                    stack.getType(), stack.getAmount(), legalSize, location.describe(),
+                    this.config.isStrictMode()));
             if (this.config.isStrictMode()) {
                 stack.setAmount(legalSize);
                 outcome = StackOutcome.MODIFIED;
             }
+        }
+
+        // Cheap material test before any item data lookup: on a typical server the
+        // vast majority of stacks are not tracked at all.
+        if (!this.stackManager.isTrackable(stack)) {
+            return outcome;
         }
 
         String uuid = this.itemManager.extractUUID(stack);
