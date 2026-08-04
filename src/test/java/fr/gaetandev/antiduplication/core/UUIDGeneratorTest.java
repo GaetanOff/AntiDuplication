@@ -16,101 +16,142 @@
 
 package fr.gaetandev.antiduplication.core;
 
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
-import static org.junit.Assert.*;
+import static org.assertj.core.api.Assertions.assertThat;
 
-public class UUIDGeneratorTest {
+class UUIDGeneratorTest {
 
     private UUIDGenerator generator;
 
-    @Before
-    public void setUp() {
+    @BeforeEach
+    void setUp() {
         this.generator = new UUIDGenerator("TEST_", 8);
     }
 
     @Test
-    public void testGenerateUUID() {
+    @DisplayName("Generated identifiers carry the prefix and the configured length")
+    void testGenerateUUID() {
         final String uuid = this.generator.generateUUID();
-        assertNotNull("UUID should not be null", uuid);
-        assertTrue("UUID should start with the prefix", uuid.startsWith("TEST_"));
-        assertEquals("UUID should have the correct length", 13, uuid.length()); // 5 (prefix) + 8
+
+        assertThat(uuid).isNotNull().startsWith("TEST_").hasSize(13);
+        assertThat(this.generator.isValidUUID(uuid)).isTrue();
     }
 
     @Test
-    public void testUUIDUniqueness() {
+    @DisplayName("Requested lengths are clamped to the supported range")
+    void testLengthClamping() {
+        assertThat(new UUIDGenerator("", 1).generateUUID()).hasSize(UUIDGenerator.MIN_LENGTH);
+        assertThat(new UUIDGenerator("", 999).generateUUID()).hasSize(UUIDGenerator.MAX_LENGTH);
+    }
+
+    @Test
+    @DisplayName("A large run never repeats an identifier")
+    void testUUIDUniqueness() {
+        final int count = 10_000;
         final Set<String> uuids = new HashSet<>();
-        final int count = 10000;
         for (int i = 0; i < count; i++) {
-            final String uuid = this.generator.generateUUID();
-            assertFalse("Duplicate UUID generated: " + uuid, uuids.contains(uuid));
-            uuids.add(uuid);
+            uuids.add(this.generator.generateUUID());
         }
-        assertEquals("Incorrect number of unique UUIDs", count, uuids.size());
+        assertThat(uuids).hasSize(count);
     }
 
     @Test
-    public void testIsValidUUID() {
-        final String validUuid = this.generator.generateUUID();
-        assertTrue("Generated UUID should be valid", this.generator.isValidUUID(validUuid));
-        assertFalse("Null UUID should be invalid", this.generator.isValidUUID(null));
-        assertFalse("Empty string should be invalid", this.generator.isValidUUID(""));
-        assertFalse("UUID without prefix should be invalid", this.generator.isValidUUID("ABCD1234"));
-        assertFalse("UUID with wrong prefix should be invalid", this.generator.isValidUUID("WRONG_ABCD1234"));
+    @DisplayName("Concurrent generation stays unique")
+    void testConcurrentUniqueness() throws InterruptedException {
+        final int threads = 8;
+        final int perThread = 500;
+        final ExecutorService pool = Executors.newFixedThreadPool(threads);
+        final Set<String> uuids = Collections.synchronizedSet(new HashSet<>());
+        final CountDownLatch done = new CountDownLatch(threads);
+
+        try {
+            for (int t = 0; t < threads; t++) {
+                pool.submit(() -> {
+                    try {
+                        for (int i = 0; i < perThread; i++) {
+                            uuids.add(this.generator.generateUUID());
+                        }
+                    } finally {
+                        done.countDown();
+                    }
+                });
+            }
+            assertThat(done.await(30, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertThat(uuids).hasSize(threads * perThread);
     }
 
     @Test
-    public void testExtractUUIDPart() {
+    @DisplayName("Validation rejects foreign and malformed identifiers")
+    void testIsValidUUID() {
+        assertThat(this.generator.isValidUUID(this.generator.generateUUID())).isTrue();
+        assertThat(this.generator.isValidUUID(null)).isFalse();
+        assertThat(this.generator.isValidUUID("")).isFalse();
+        assertThat(this.generator.isValidUUID("ABCD1234")).isFalse();
+        assertThat(this.generator.isValidUUID("WRONG_ABCD1234")).isFalse();
+        assertThat(this.generator.isValidUUID("TEST_SHORT")).isFalse();
+        assertThat(this.generator.isValidUUID("TEST_ABCDEFG!")).isFalse();
+        // I, O, 0 and 1 are excluded from the alphabet to stay unambiguous.
+        assertThat(this.generator.isValidUUID("TEST_ABCDEFGI")).isFalse();
+    }
+
+    @Test
+    @DisplayName("The identifier body can be read back without the prefix")
+    void testExtractUUIDPart() {
         final String fullUuid = this.generator.generateUUID();
         final String uuidPart = this.generator.extractUUIDPart(fullUuid);
-        assertNotNull("UUID part should not be null", uuidPart);
-        assertEquals("UUID part should have the correct length", 8, uuidPart.length());
-        assertFalse("UUID part should not contain the prefix", uuidPart.contains("TEST_"));
+
+        assertThat(uuidPart).isNotNull().hasSize(8).doesNotContain("TEST_");
+        assertThat(this.generator.extractUUIDPart("WRONG_ABCDEFGH")).isNull();
     }
 
     @Test
-    public void testGenerateBatch() {
-        final int batchSize = 100;
-        final String[] batch = this.generator.generateBatch(batchSize);
-        assertNotNull("Batch should not be null", batch);
-        assertEquals("Batch should have the correct size", batchSize, batch.length);
-        final Set<String> uniqueUuids = new HashSet<>();
-        for (final String uuid : batch) {
-            assertNotNull("UUID in batch should not be null", uuid);
-            assertTrue("UUID in batch should be valid", this.generator.isValidUUID(uuid));
-            uniqueUuids.add(uuid);
-        }
-        assertEquals("All UUIDs in batch should be unique", batchSize, uniqueUuids.size());
+    @DisplayName("Batches are unique and valid")
+    void testGenerateBatch() {
+        final List<String> batch = Arrays.asList(this.generator.generateBatch(100));
+
+        assertThat(batch).hasSize(100).doesNotContainNull().doesNotHaveDuplicates();
+        assertThat(batch).allMatch(this.generator::isValidUUID);
     }
 
     @Test
-    public void testGeneratorStats() {
+    @DisplayName("Degenerate batch sizes yield an empty array")
+    void testDegenerateBatch() {
+        assertThat(this.generator.generateBatch(0)).isEmpty();
+        assertThat(this.generator.generateBatch(-5)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("Statistics reflect the generated volume")
+    void testGeneratorStats() {
         for (int i = 0; i < 10; i++) {
             this.generator.generateUUID();
         }
         final UUIDGenerator.GeneratorStats stats = this.generator.getStats();
-        assertNotNull("Stats should not be null", stats);
-        assertTrue("Cache size should be > 0", stats.getCacheSize() > 0);
-        assertEquals("Prefix should match", "TEST_", stats.getPrefix());
-        assertEquals("Length should match", 8, stats.getLength());
-        assertTrue("Collision probability should be >= 0", stats.getCollisionProbability() >= 0.0);
-    }
 
-    @Test
-    public void testEmptyBatch() {
-        final String[] batch = this.generator.generateBatch(0);
-        assertNotNull("Empty batch should not be null", batch);
-        assertEquals("Empty batch should have length 0", 0, batch.length);
-    }
-
-    @Test
-    public void testNegativeBatch() {
-        final String[] batch = this.generator.generateBatch(-5);
-        assertNotNull("Negative batch should not be null", batch);
-        assertEquals("Negative batch should have length 0", 0, batch.length);
+        assertThat(stats).isNotNull();
+        assertThat(stats.getCacheSize()).isEqualTo(10);
+        assertThat(stats.getGenerated()).isEqualTo(10);
+        assertThat(stats.getCollisions()).isZero();
+        assertThat(stats.getPrefix()).isEqualTo("TEST_");
+        assertThat(stats.getLength()).isEqualTo(8);
+        assertThat(stats.getCollisionProbability()).isGreaterThanOrEqualTo(0.0);
+        assertThat(stats.toString()).contains("TEST_");
     }
 }
