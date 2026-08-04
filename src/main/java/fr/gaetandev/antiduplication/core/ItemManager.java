@@ -25,15 +25,19 @@ import fr.gaetandev.antiduplication.utils.NBTUtils;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
-import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 
-import java.util.*;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
-import java.util.stream.Collectors;
 
+/**
+ * Owns the identity of tracked items: stamping them, remembering who held them,
+ * and applying the removals decided by the detector.
+ */
 public final class ItemManager {
 
     private final AntiDuplicationPlugin plugin;
@@ -41,283 +45,205 @@ public final class ItemManager {
     private final JsonLogger logger;
     private final UUIDGenerator uuidGenerator;
     private final StackManager stackManager;
-    private final Map<String, Set<TrackedItem>> itemRegistry;
-    private final Map<String, Long> lastSeenCache;
+    private final StackDivisionTracker divisionTracker;
+    private final ItemRemover itemRemover;
 
-    private final Map<String, Integer> legitimateDivisions;
-    private final Map<String, Long> divisionTimestamps;
+    /**
+     * Last known holder of each UUID. This is what lets the plugin tell the
+     * original from the copies: whichever copy sits where the UUID was already
+     * seen is the one that gets to stay.
+     */
+    private final Map<String, OwnerRecord> owners = new ConcurrentHashMap<>();
 
-    // Statistics
-    private final AtomicLong totalItemsTracked = new AtomicLong(0);
-    private final AtomicLong duplicationsDetected = new AtomicLong(0);
-    private final AtomicLong itemsRemoved = new AtomicLong(0);
+    private final AtomicLong totalItemsTracked = new AtomicLong();
+    private final AtomicLong duplicationsDetected = new AtomicLong();
+    private final AtomicLong itemsRemoved = new AtomicLong();
+    private final AtomicLong removalsSkipped = new AtomicLong();
 
     public ItemManager(final AntiDuplicationPlugin plugin, final ConfigManager config, final JsonLogger logger) {
         this.plugin = plugin;
         this.config = config;
         this.logger = logger;
         this.uuidGenerator = new UUIDGenerator(config.getUuidPrefix(), config.getUuidLength());
-        this.stackManager = new StackManager(plugin, config, this);
+        this.stackManager = new StackManager(plugin, config);
+        this.divisionTracker = new StackDivisionTracker(
+                config::getDivisionToleranceMillis, config::getMaxDivisionsPerStack);
+        this.itemRemover = new ItemRemover(plugin, this);
 
-        this.itemRegistry = new ConcurrentHashMap<>();
-        this.lastSeenCache = new ConcurrentHashMap<>();
-        this.legitimateDivisions = new ConcurrentHashMap<>();
-        this.divisionTimestamps = new ConcurrentHashMap<>();
-        plugin.getLogger().info("ItemManager initialized with UUID " + config.getUuidPrefix() +
-                " (length: " + config.getUuidLength() + ")");
+        plugin.getLogger().info(String.format(
+                "ItemManager initialized: tag '%s', prefix '%s', length %d, item data via %s",
+                config.getNbtTag(), config.getUuidPrefix(), config.getUuidLength(), NBTUtils.getProviderName()));
     }
 
-    public boolean assignUUIDIfNeeded(final ItemStack itemStack) {
-        if (itemStack == null || itemStack.getType() == Material.AIR) {
-            return false;
+    /**
+     * Stamps a fresh UUID on an item that does not have one yet. Must be called
+     * from the main thread, since it writes to a live stack.
+     *
+     * @return the assigned UUID, the existing one when already stamped, or
+     *         {@code null} when the item cannot or should not be tracked
+     */
+    public String assignUUID(final ItemStack itemStack) {
+        if (!this.stackManager.isTrackable(itemStack)) {
+            return null;
         }
-
-        if (this.hasValidUUID(itemStack)) {
-            return false;
-        }
-
-        return this.assignBasicUUID(itemStack);
-    }
-
-    public boolean assignBasicUUID(final ItemStack itemStack) {
-        if (itemStack == null || itemStack.getType() == Material.AIR) {
-            return false;
-        }
-
-        if (this.hasValidUUID(itemStack)) {
-            return false;
+        final String existing = this.extractUUID(itemStack);
+        if (existing != null) {
+            return existing;
         }
 
         final String uuid = this.uuidGenerator.generateUUID();
-
         if (!NBTUtils.setNBTString(itemStack, this.config.getNbtTag(), uuid)) {
-            this.plugin.getLogger().warning("Unable to assign UUID to item" + itemStack.getType());
-            return false;
+            this.plugin.getLogger().warning("Unable to stamp a UUID on " + itemStack.getType());
+            return null;
         }
-
         this.totalItemsTracked.incrementAndGet();
-
-        this.plugin.getLogger().fine("UUID assigned: " + uuid + " for " + itemStack.getType());
-        return true;
+        return uuid;
     }
 
+    /**
+     * @return {@code true} when a UUID was newly assigned
+     */
+    public boolean assignUUIDIfNeeded(final ItemStack itemStack) {
+        if (!this.stackManager.isTrackable(itemStack) || this.extractUUID(itemStack) != null) {
+            return false;
+        }
+        return this.assignUUID(itemStack) != null;
+    }
+
+    /**
+     * @return the plugin UUID carried by the item, or {@code null} when absent or malformed
+     */
     public String extractUUID(final ItemStack itemStack) {
-        if (itemStack == null || !itemStack.hasItemMeta()) {
+        if (itemStack == null || itemStack.getType() == Material.AIR) {
             return null;
         }
         final String uuid = NBTUtils.getNBTString(itemStack, this.config.getNbtTag());
-        return (uuid != null && this.uuidGenerator.isValidUUID(uuid)) ? uuid : null;
+        return uuid != null && this.uuidGenerator.isValidUUID(uuid) ? uuid : null;
     }
 
     public boolean hasValidUUID(final ItemStack itemStack) {
-        final String uuid = this.extractUUID(itemStack);
-        return uuid != null && this.uuidGenerator.isValidUUID(uuid);
+        return this.extractUUID(itemStack) != null;
     }
 
-    public void registerLegitimateStackDivision(final String originalUuid, final int totalAmount) {
-        this.legitimateDivisions.put(originalUuid, totalAmount);
-        this.divisionTimestamps.put(originalUuid, System.currentTimeMillis());
-
-        this.plugin.getLogger().fine(String.format(
-                "Division légitime enregistrée: UUID %s, quantité totale autorisée: %d",
-                originalUuid, totalAmount));
+    /**
+     * Clears the plugin tag, so the item can be re-stamped on the next sweep.
+     */
+    public boolean clearUUID(final ItemStack itemStack) {
+        return NBTUtils.removeNBTKey(itemStack, this.config.getNbtTag());
     }
 
-    private boolean isLegitimateStackDivision(final String uuid, final List<TrackedItem> items) {
-        final Integer authorizedTotal = this.legitimateDivisions.get(uuid);
-        if (authorizedTotal == null) {
-            return false;
+    /**
+     * Records that a stack was legitimately split, so its pieces are not
+     * reported as a duplication for the configured tolerance window.
+     */
+    public void registerLegitimateStackDivision(final String uuid, final int totalAmount) {
+        this.divisionTracker.register(uuid, totalAmount);
+    }
+
+    /**
+     * Remembers where a UUID currently lives.
+     */
+    void rememberOwner(final String uuid, final String ownerKey) {
+        if (!this.config.shouldCacheResults()) {
+            return;
+        }
+        this.owners.put(uuid, new OwnerRecord(ownerKey));
+    }
+
+    /**
+     * @return the holder this UUID was last seen at, or {@code null} when unknown
+     */
+    String knownOwner(final String uuid) {
+        final OwnerRecord record = this.owners.get(uuid);
+        return record != null ? record.ownerKey : null;
+    }
+
+    void forgetOwner(final String uuid) {
+        this.owners.remove(uuid);
+        this.divisionTracker.forget(uuid);
+    }
+
+    void countDetectedDuplication() {
+        this.duplicationsDetected.incrementAndGet();
+    }
+
+    /**
+     * Deletes the extra copies of every event and reports them. Must run on the
+     * main thread.
+     */
+    public int applyDuplicationEvents(final List<DuplicationEvent> events) {
+        if (!Bukkit.isPrimaryThread()) {
+            throw new IllegalStateException("Duplication events may only be applied from the main thread");
         }
 
-        final int currentTotal = items.stream()
-                .mapToInt(TrackedItem::getAmount)
-                .sum();
-
-        final boolean isLegitimate = currentTotal <= authorizedTotal;
-
-        final Long divisionTime = this.divisionTimestamps.get(uuid);
-        final boolean isRecent = divisionTime != null &&
-                (System.currentTimeMillis() - divisionTime) < (this.config.getDivisionTolerence() * 1000L); // 30 secondes
-
-        if (isLegitimate && isRecent) {
-            this.plugin.getLogger().fine(String.format(
-                    "Legitimate stack division: UUID %s, %d/%d items",
-                    uuid, currentTotal, authorizedTotal));
-            return true;
-        }
-
-        if (!isRecent) {
-            this.legitimateDivisions.remove(uuid);
-            this.divisionTimestamps.remove(uuid);
-        }
-
-        return false;
-    }
-
-    public void registerItem(final TrackedItem trackedItem) {
-        final String uuid = trackedItem.getUuid();
-        this.itemRegistry.computeIfAbsent(uuid, k -> ConcurrentHashMap.newKeySet()).add(trackedItem);
-        this.lastSeenCache.put(uuid, System.currentTimeMillis());
-        this.plugin.getLogger().finest("Item registered: " + trackedItem);
-    }
-
-    public void unregisterItem(final String uuid, final TrackedItem trackedItem) {
-        final Set<TrackedItem> items = this.itemRegistry.get(uuid);
-        if (items != null) {
-            items.remove(trackedItem);
-            if (items.isEmpty()) {
-                this.itemRegistry.remove(uuid);
-                this.lastSeenCache.remove(uuid);
-            }
-        }
-    }
-
-    public List<DuplicationEvent> detectDuplications() {
-        final List<DuplicationEvent> events = new ArrayList<>();
-        final long startTime = System.currentTimeMillis();
-
-        for (final Map.Entry<String, Set<TrackedItem>> entry : this.itemRegistry.entrySet()) {
-            final String uuid = entry.getKey();
-            final Set<TrackedItem> items = entry.getValue();
-
-            if (items.size() > 1) {
-                if (!this.isLegitimateStackDivision(uuid, new ArrayList<>(items))) {
-                    final DuplicationEvent event = new DuplicationEvent.Builder()
-                            .duplicatedUuid(uuid)
-                            .duplicatedItems(new ArrayList<>(items))
-                            .detectionMethod("registry_scan")
-                            .scanDurationMs(System.currentTimeMillis() - startTime)
-                            .build();
-
-                    events.add(event);
-                    this.duplicationsDetected.incrementAndGet();
-
-                    this.plugin.getLogger().warning("Duplication detected: " + event.getSummary());
-                } else {
-                    this.plugin.getLogger().fine("Legitimate division ignored for UUID: " + uuid);
-                }
-            }
-        }
-
-        return events;
-    }
-
-    public void processDuplicationEvents(final List<DuplicationEvent> events) {
+        int removed = 0;
         for (final DuplicationEvent event : events) {
             try {
-                this.processSingleDuplicationEvent(event);
-            } catch (final Exception e) {
+                removed += this.applyDuplicationEvent(event);
+            } catch (final RuntimeException e) {
                 this.plugin.getLogger().log(Level.SEVERE,
                         "Error processing duplication " + event.getDuplicatedUuid(), e);
-            }
-        }
-    }
-
-    private void processSingleDuplicationEvent(final DuplicationEvent event) {
-        final String uuid = event.getDuplicatedUuid();
-        final List<TrackedItem> duplicatedItems = event.getDuplicatedItems();
-        this.logger.logDuplicationEvent(event);
-        this.notifyAdministrators(event);
-        final int removed = this.removeDuplicatedItems(duplicatedItems);
-        this.itemsRemoved.addAndGet(removed);
-        this.itemRegistry.remove(uuid);
-        this.lastSeenCache.remove(uuid);
-        this.plugin.getLogger().info(String.format(
-                "Duplication processed: UUID %s, %d items removed", uuid, removed));
-    }
-
-    private int removeDuplicatedItems(final List<TrackedItem> duplicatedItems) {
-        int removed = 0;
-        for (final TrackedItem item : duplicatedItems) {
-            try {
-                if (this.removeItemFromGame(item)) {
-                    removed++;
-                }
-            } catch (final Exception e) {
-                this.plugin.getLogger().log(Level.WARNING,
-                        "Error removing item " + item, e);
             }
         }
         return removed;
     }
 
-    /**
-     * Must be called from the main server thread.
-     */
-    private boolean removeItemFromGame(final TrackedItem item) {
-        if (!Bukkit.isPrimaryThread()) {
-            throw new IllegalStateException("removeItemFromGame must be called from the main thread");
-        }
-        final String playerName = item.getPlayerName();
-        if (playerName != null) {
-            final Player player = Bukkit.getPlayerExact(playerName);
-            if (player != null) {
-                return this.removeItemFromPlayerInventory(player, item);
-            }
-        }
-        // TODO: Implement deletion from chests/containers
-        // For now, we are focusing on player inventories
-        return false;
-    }
+    private int applyDuplicationEvent(final DuplicationEvent event) {
+        this.logger.logDuplicationEvent(event);
+        this.notifyAdministrators(event);
 
-    private boolean removeItemFromPlayerInventory(final Player player, final TrackedItem item) {
-        final Inventory inventory = player.getInventory();
-        for (int i = 0; i < inventory.getSize(); i++) {
-            final ItemStack stack = inventory.getItem(i);
-            if (stack != null) {
-                final String stackUuid = this.extractUUID(stack);
-                if (item.getUuid().equals(stackUuid)) {
-                    inventory.setItem(i, null);
-                    player.sendMessage("§c[AntiDupe] Duplicated item removed from your inventory.");
-                    return true;
-                }
+        int removed = 0;
+        int skipped = 0;
+        for (final TrackedItem copy : event.getItemsToRemove()) {
+            if (this.itemRemover.remove(copy).isRemoved()) {
+                removed++;
+            } else {
+                skipped++;
             }
         }
-        return false;
+
+        this.itemsRemoved.addAndGet(removed);
+        this.removalsSkipped.addAndGet(skipped);
+
+        // The retained copy keeps the UUID, so ownership is rewritten rather
+        // than dropped; the division budget is reset since the stack is whole.
+        this.rememberOwner(event.getDuplicatedUuid(), event.getRetainedItem().getItemLocation().getOwnerKey());
+        this.divisionTracker.forget(event.getDuplicatedUuid());
+
+        this.plugin.getLogger().warning(String.format(
+                "Duplication handled: UUID %s, %d copies removed, %d skipped, kept %s",
+                event.getDuplicatedUuid(), removed, skipped,
+                event.getRetainedItem().getLocationDescription()));
+        return removed;
     }
 
     private void notifyAdministrators(final DuplicationEvent event) {
-        final String message = String.format("§c[AntiDupe] %s", event.getSummary());
-        Bukkit.getOnlinePlayers().stream()
-                .filter(player -> player.hasPermission("antiduplication.admin"))
-                .forEach(admin -> admin.sendMessage(message));
-    }
-
-    /**
-     * Assign UUIDs to all existing items on server start.
-     */
-    public void initializeExistingItems() {
-        this.plugin.getLogger().info("Starting initialization of existing items...");
-        int processed = 0;
-        int assigned = 0;
-        for (final Player player : Bukkit.getOnlinePlayers()) {
-            for (final ItemStack item : player.getInventory().getContents()) {
-                if (item != null && item.getType() != Material.AIR) {
-                    processed++;
-                    if (this.assignUUIDIfNeeded(item)) {
-                        assigned++;
-                    }
-                }
+        final String message = "§c[AntiDupe] " + event.getSummary();
+        for (final Player online : Bukkit.getOnlinePlayers()) {
+            if (online.hasPermission("antiduplication.admin")) {
+                online.sendMessage(message);
             }
         }
-        this.plugin.getLogger().info(String.format(
-                "Initialization complete: %d items processed, %d UUIDs assigned", processed, assigned));
     }
 
     /**
-     * Remove outdated entries from cache and registry.
+     * Drops registry entries that have not been seen for a while, and expired
+     * stack division records.
+     *
+     * @return the number of forgotten UUIDs
      */
-    public void cleanupOldItems() {
-        final long cutoffTime = System.currentTimeMillis() - this.config.getCacheTtlMillis();
+    public int cleanupOldItems() {
+        final long ttl = this.config.getCacheTtlMillis();
+        final int before = this.owners.size();
+        this.owners.values().removeIf(record -> record.isExpired(ttl));
+        final int forgotten = before - this.owners.size();
+        final int expiredDivisions = this.divisionTracker.evictExpired();
 
-        this.lastSeenCache.entrySet().removeIf(entry -> entry.getValue() < cutoffTime);
-
-        final long divisionCutoff = System.currentTimeMillis() - 300000; // 5 minutes
-        this.divisionTimestamps.entrySet().removeIf(entry -> entry.getValue() < divisionCutoff);
-        this.legitimateDivisions.keySet().retainAll(this.divisionTimestamps.keySet());
-
-        final Set<String> validUuids = new HashSet<>(this.lastSeenCache.keySet());
-        this.itemRegistry.keySet().retainAll(validUuids);
+        if (forgotten > 0 || expiredDivisions > 0) {
+            this.plugin.getLogger().fine(String.format(
+                    "Cleanup: %d UUIDs forgotten, %d division records expired", forgotten, expiredDivisions));
+        }
+        return forgotten;
     }
 
     public long getTotalItemsTracked() {
@@ -332,32 +258,64 @@ public final class ItemManager {
         return this.itemsRemoved.get();
     }
 
+    public long getRemovalsSkipped() {
+        return this.removalsSkipped.get();
+    }
+
     public int getActiveRegistrySize() {
-        return this.itemRegistry.size();
+        return this.owners.size();
     }
 
     public StackManager getStackManager() {
         return this.stackManager;
     }
 
-    public Map<String, Integer> getRegistryStats() {
-        return this.itemRegistry.entrySet().stream()
-                .collect(Collectors.toMap(
-                        Map.Entry::getKey,
-                        entry -> entry.getValue().size()
-                ));
+    public StackDivisionTracker getDivisionTracker() {
+        return this.divisionTracker;
+    }
+
+    public UUIDGenerator getUuidGenerator() {
+        return this.uuidGenerator;
     }
 
     public String generateStatsReport() {
         final StringBuilder report = new StringBuilder();
         report.append("=== AntiDuplication Statistics ===\n");
-        report.append("Tracked items: ").append(this.totalItemsTracked.get()).append("\n");
-        report.append("Detected duplications: ").append(this.duplicationsDetected.get()).append("\n");
-        report.append("Removed items: ").append(this.itemsRemoved.get()).append("\n");
-        report.append("Active registry: ").append(this.itemRegistry.size()).append(" UUIDs\n");
-        report.append("Cache: ").append(this.lastSeenCache.size()).append(" entries\n");
-        final UUIDGenerator.GeneratorStats genStats = this.uuidGenerator.getStats();
-        report.append("Generator: ").append(genStats.toString()).append("\n");
+        report.append("Item data backend: ").append(NBTUtils.getProviderName()).append("\n");
+        report.append("UUIDs assigned: ").append(this.totalItemsTracked.get()).append("\n");
+        report.append("Duplications detected: ").append(this.duplicationsDetected.get()).append("\n");
+        report.append("Copies removed: ").append(this.itemsRemoved.get()).append("\n");
+        report.append("Removals skipped (item moved): ").append(this.removalsSkipped.get()).append("\n");
+        report.append("Known UUIDs: ").append(this.owners.size()).append("\n");
+        report.append("Pending stack divisions: ").append(this.divisionTracker.size()).append("\n");
+        report.append(this.stackManager.generateStackStats()).append("\n");
+        report.append("Generator: ").append(this.uuidGenerator.getStats()).append("\n");
         return report.toString();
+    }
+
+    /**
+     * Where a UUID was last seen, with the timestamp used for expiry.
+     */
+    private static final class OwnerRecord {
+        private final String ownerKey;
+        private final long seenAt;
+
+        OwnerRecord(final String ownerKey) {
+            this.ownerKey = ownerKey;
+            this.seenAt = System.currentTimeMillis();
+        }
+
+        boolean isExpired(final long ttlMillis) {
+            return System.currentTimeMillis() - this.seenAt > ttlMillis;
+        }
+    }
+
+    /**
+     * Exposed for the detector, which needs a reference date when a UUID was
+     * already known before this sweep.
+     */
+    Instant firstSeen(final String uuid) {
+        final OwnerRecord record = this.owners.get(uuid);
+        return record != null ? Instant.ofEpochMilli(record.seenAt) : null;
     }
 }
