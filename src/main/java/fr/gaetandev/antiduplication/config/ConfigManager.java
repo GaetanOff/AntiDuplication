@@ -147,9 +147,10 @@ public final class ConfigManager {
             this.nbtTag = "AntiDupeUUID";
         }
         if (this.trackStackableItems) {
-            this.plugin.getLogger().warning("security.track-stackable-items is enabled: stackable items will "
-                    + "carry a unique tag and therefore stop merging with each other in game. "
-                    + "Only keep this on if you accept that trade-off.");
+            this.plugin.getLogger().warning("security.track-stackable-items is enabled (experimental): stackable "
+                    + "items will carry a unique tag and therefore stop merging with each other in game, and any "
+                    + "stack split the plugin does not see becomes a false positive. Only keep this on if you "
+                    + "accept both trade-offs.");
         }
         if (this.blockNoUuid && this.strictMode) {
             this.plugin.getLogger().warning("security.block-no-uuid is enabled: trackable items without a UUID "

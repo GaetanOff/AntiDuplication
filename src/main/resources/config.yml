@@ -71,15 +71,20 @@ security:
   # Monitor critical zones
   monitor-creative: true
   monitor-admin-commands: true
-  # Also track stackable items.
+  # Also track stackable items. EXPERIMENTAL, off by default, two reasons:
   #
-  # OFF BY DEFAULT ON PURPOSE: the UUID lives in the item data, and Minecraft
-  # only merges stacks whose data is identical. Stamping a unique UUID on a
-  # stackable item therefore stops it from stacking in game, which hurts players
-  # far more than the duplication it catches. Non-stackable items (tools, armour,
-  # enchanted books...) have no such constraint and are what exploits target.
+  # 1. The UUID lives in the item data, and Minecraft only merges stacks whose
+  #    data is identical. A unique UUID on a stackable item therefore stops it
+  #    from stacking in game, which hurts players far more than the duplication
+  #    it catches.
+  # 2. Splitting a stack copies its UUID, so every operation that splits one has
+  #    to be recognised or its pieces look duplicated. Clicks, drags, partial
+  #    pickups and hopper transfers are handled; anything else that splits a
+  #    stack without going through those events can produce a false positive,
+  #    and a false positive here means a real item is deleted.
   #
-  # Turn this on only if you accept that stackable items will no longer merge.
+  # Non-stackable items (tools, armour, enchanted books...) have neither problem,
+  # and they are what duplication exploits actually target.
   track-stackable-items: false
   # Tolerance for stack divisions (in seconds). Splitting a stack copies its
   # UUID, so the pieces are allowed to share it for this long. Only relevant

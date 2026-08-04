@@ -60,10 +60,13 @@ dirt you pick up would no longer join the dirt already in your inventory. That
 breaks normal play far more than the duplication it would catch, and
 non-stackable items are what duplication exploits actually target.
 
-`security.track-stackable-items` turns tracking on for everything if you accept
-that trade-off. Splitting a stack copies its identifier, so the plugin keeps a
-tolerance window (`division-tolerance`, `max-divisions-per-stack`) during which
-the pieces of a split stack are recognised instead of being reported.
+`security.track-stackable-items` turns tracking on for everything, and is
+**experimental**. Splitting a stack copies its identifier, so every operation
+that splits one has to be recognised or its pieces look duplicated — and a false
+positive means a real item is deleted. Clicks, drags, partial pickups and hopper
+transfers are recorded, and the pieces are accepted for `division-tolerance`
+seconds up to `max-divisions-per-stack` pieces. Anything else that splits a stack
+without passing through those events can still be misreported.
 
 ### The scan pipeline
 
@@ -92,9 +95,15 @@ worse than catching a duplicate five seconds later.
 Scanned: player inventories (storage, armour, off hand), the cursor, ender
 chests, every container in loaded chunks, and dropped items.
 
-Not scanned: inventories carried by entities (chest minecarts, horse chests) and
-offline players' inventories. Duplicates hidden there are not detected — they are
-never falsely reported either.
+Not scanned: inventories carried by entities (chest minecarts, horse chests),
+items nested inside a shulker box held in an inventory, and offline players'
+inventories. Duplicates hidden there are not detected — they are never falsely
+reported either, and they are picked up as soon as the item comes back into view
+(a placed shulker box is a container like any other).
+
+Players holding `antiduplication.bypass` are skipped entirely: their items are
+neither stamped, nor scanned, nor trimmed. Useful for a builder account in
+Creative, where middle-click cloning legitimately produces two identical items.
 
 ---
 
