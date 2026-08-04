@@ -23,7 +23,6 @@ import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.block.BlockState;
 import org.bukkit.block.Chest;
-import org.bukkit.entity.Entity;
 import org.bukkit.entity.Item;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
@@ -33,13 +32,13 @@ import org.bukkit.inventory.ItemStack;
 import java.util.UUID;
 
 /**
- * Deletes a duplicated copy from wherever it was observed.
+ * Checks and deletes a copy at the exact place it was observed.
  *
- * <p>Deletion is deliberately conservative: the item is only removed from the
- * exact slot it was recorded in, and only if that slot still carries the same
- * UUID. Anything that moved between the sweep and the removal pass is left
- * alone and picked up by the next scan. Guessing would risk destroying a
- * legitimate item, which is far worse than catching a duplicate one scan later.
+ * <p>Deletion is deliberately conservative: a copy is only removed from the slot
+ * it was recorded in, and only if that slot still carries the same UUID.
+ * Anything that moved between the sweep and the removal pass is left alone and
+ * picked up by the next scan. Guessing would risk destroying a legitimate item,
+ * which is far worse than catching a duplicate one scan later.
  */
 public final class ItemRemover {
 
@@ -52,6 +51,37 @@ public final class ItemRemover {
     }
 
     /**
+     * Whether the recorded location still holds this exact UUID.
+     *
+     * <p>This is what makes a multi-tick sweep safe. Players and containers are
+     * scanned in different ticks, so an item carried from an inventory to a chest
+     * in between appears in both slices and looks duplicated. Re-checking every
+     * copy on the main thread, right before acting, filters those ghosts out: an
+     * item can only be in one place at a time, so at most as many copies survive
+     * the check as really exist.
+     *
+     * <p>Must be called from the main thread.
+     */
+    public boolean stillPresent(final TrackedItem item) {
+        final ItemLocation location = item.getItemLocation();
+        if (location.getKind() == ItemLocation.Kind.GROUND) {
+            return this.findDroppedEntity(item) != null;
+        }
+        if (location.getKind() == ItemLocation.Kind.PLAYER_CURSOR) {
+            final Player player = this.resolvePlayer(location.getHolderId());
+            return player != null && this.matches(player.getItemOnCursor(), item.getUuid());
+        }
+
+        final Inventory inventory = this.resolveInventory(location);
+        if (inventory == null) {
+            return false;
+        }
+        final int slot = location.getSlot();
+        return slot >= 0 && slot < inventory.getSize()
+                && this.matches(inventory.getItem(slot), item.getUuid());
+    }
+
+    /**
      * Must be called from the main thread.
      *
      * @return the outcome of the attempt, for statistics and logging
@@ -61,109 +91,120 @@ public final class ItemRemover {
             throw new IllegalStateException("Items may only be removed from the main thread");
         }
 
-        final ItemLocation location = item.getItemLocation();
-        final Result result = this.removeAt(item, location);
+        final Result result = this.removeAt(item);
         if (result != Result.REMOVED) {
-            this.plugin.getLogger().fine(String.format(
-                    "Copy %s not removed at %s: %s", item.getUuid(), location.describe(), result));
+            this.plugin.debug(String.format("Copy %s not removed at %s: %s",
+                    item.getUuid(), item.getItemLocation().describe(), result));
         }
         return result;
     }
 
-    private Result removeAt(final TrackedItem item, final ItemLocation location) {
+    private Result removeAt(final TrackedItem item) {
+        final ItemLocation location = item.getItemLocation();
         switch (location.getKind()) {
-            case PLAYER_INVENTORY:
-                return this.removeFromPlayerSlot(item, location, false);
-            case PLAYER_ENDER_CHEST:
-                return this.removeFromPlayerSlot(item, location, true);
-            case PLAYER_CURSOR:
-                return this.removeFromCursor(item, location);
-            case CONTAINER:
-                return this.removeFromContainer(item, location);
             case GROUND:
-                return this.removeFromGround(item, location);
+                final Item dropped = this.findDroppedEntity(item);
+                if (dropped == null) {
+                    return Result.MOVED;
+                }
+                dropped.remove();
+                return Result.REMOVED;
+
+            case PLAYER_CURSOR:
+                final Player holder = this.resolvePlayer(location.getHolderId());
+                if (holder == null) {
+                    return Result.HOLDER_GONE;
+                }
+                if (!this.matches(holder.getItemOnCursor(), item.getUuid())) {
+                    return Result.MOVED;
+                }
+                holder.setItemOnCursor(null);
+                holder.sendMessage("§c[AntiDupe] A duplicated item was removed from your cursor.");
+                return Result.REMOVED;
+
+            case PLAYER_INVENTORY:
+            case PLAYER_ENDER_CHEST:
+            case CONTAINER:
+                return this.clearSlot(item, location);
+
             default:
                 return Result.UNSUPPORTED;
         }
     }
 
-    private Result removeFromPlayerSlot(final TrackedItem item, final ItemLocation location, final boolean enderChest) {
-        final Player player = this.resolvePlayer(location.getHolderId());
-        if (player == null) {
-            return Result.HOLDER_GONE;
-        }
-        final Inventory inventory = enderChest ? player.getEnderChest() : player.getInventory();
-        final Result result = this.clearSlot(inventory, location.getSlot(), item.getUuid());
-        if (result == Result.REMOVED) {
-            player.sendMessage("§c[AntiDupe] A duplicated item was removed from your inventory.");
-            player.updateInventory();
-        }
-        return result;
-    }
-
-    private Result removeFromCursor(final TrackedItem item, final ItemLocation location) {
-        final Player player = this.resolvePlayer(location.getHolderId());
-        if (player == null) {
-            return Result.HOLDER_GONE;
-        }
-        final ItemStack cursor = player.getItemOnCursor();
-        if (!this.matches(cursor, item.getUuid())) {
-            return Result.MOVED;
-        }
-        player.setItemOnCursor(null);
-        player.sendMessage("§c[AntiDupe] A duplicated item was removed from your cursor.");
-        return Result.REMOVED;
-    }
-
-    private Result removeFromContainer(final TrackedItem item, final ItemLocation location) {
-        final Location blockLocation = location.getBlockLocation();
-        if (blockLocation == null || blockLocation.getWorld() == null) {
-            return Result.HOLDER_GONE;
-        }
-        if (!blockLocation.getWorld().isChunkLoaded(blockLocation.getBlockX() >> 4, blockLocation.getBlockZ() >> 4)) {
-            return Result.HOLDER_GONE;
-        }
-
-        final BlockState state = blockLocation.getBlock().getState();
-        final Inventory inventory = state instanceof Chest
-                ? ((Chest) state).getBlockInventory()
-                : (state instanceof InventoryHolder ? ((InventoryHolder) state).getInventory() : null);
+    private Result clearSlot(final TrackedItem item, final ItemLocation location) {
+        final Inventory inventory = this.resolveInventory(location);
         if (inventory == null) {
             return Result.HOLDER_GONE;
         }
-        return this.clearSlot(inventory, location.getSlot(), item.getUuid());
-    }
-
-    private Result removeFromGround(final TrackedItem item, final ItemLocation location) {
-        final Location blockLocation = location.getBlockLocation();
-        final UUID entityId = location.getHolderId();
-        if (blockLocation == null || blockLocation.getWorld() == null || entityId == null) {
-            return Result.HOLDER_GONE;
-        }
-
-        for (final Entity entity : blockLocation.getWorld().getEntitiesByClass(Item.class)) {
-            if (!entityId.equals(entity.getUniqueId())) {
-                continue;
-            }
-            final Item dropped = (Item) entity;
-            if (!this.matches(dropped.getItemStack(), item.getUuid())) {
-                return Result.MOVED;
-            }
-            dropped.remove();
-            return Result.REMOVED;
-        }
-        return Result.HOLDER_GONE;
-    }
-
-    private Result clearSlot(final Inventory inventory, final int slot, final String uuid) {
-        if (slot < 0 || slot >= inventory.getSize()) {
+        final int slot = location.getSlot();
+        if (slot < 0 || slot >= inventory.getSize() || !this.matches(inventory.getItem(slot), item.getUuid())) {
             return Result.MOVED;
         }
-        if (!this.matches(inventory.getItem(slot), uuid)) {
-            return Result.MOVED;
-        }
+
         inventory.setItem(slot, null);
+        if (location.getKind().isPlayerHeld()) {
+            final Player player = this.resolvePlayer(location.getHolderId());
+            if (player != null) {
+                player.sendMessage("§c[AntiDupe] A duplicated item was removed from your inventory.");
+                player.updateInventory();
+            }
+        }
         return Result.REMOVED;
+    }
+
+    /**
+     * @return the live inventory behind a location, or {@code null} when the
+     *         holder is offline, unloaded or no longer a container
+     */
+    private Inventory resolveInventory(final ItemLocation location) {
+        switch (location.getKind()) {
+            case PLAYER_INVENTORY: {
+                final Player player = this.resolvePlayer(location.getHolderId());
+                return player != null ? player.getInventory() : null;
+            }
+            case PLAYER_ENDER_CHEST: {
+                final Player player = this.resolvePlayer(location.getHolderId());
+                return player != null ? player.getEnderChest() : null;
+            }
+            case CONTAINER:
+                return resolveContainerInventory(location.getBlockLocation());
+            default:
+                return null;
+        }
+    }
+
+    private static Inventory resolveContainerInventory(final Location blockLocation) {
+        if (blockLocation == null || blockLocation.getWorld() == null) {
+            return null;
+        }
+        if (!blockLocation.getWorld().isChunkLoaded(blockLocation.getBlockX() >> 4, blockLocation.getBlockZ() >> 4)) {
+            return null;
+        }
+
+        final BlockState state = blockLocation.getBlock().getState();
+        // The same accessor as the sweep, so slot indices line up: the joined
+        // inventory of a double chest would shift them.
+        if (state instanceof Chest) {
+            return ((Chest) state).getBlockInventory();
+        }
+        return state instanceof InventoryHolder ? ((InventoryHolder) state).getInventory() : null;
+    }
+
+    private Item findDroppedEntity(final TrackedItem item) {
+        final Location location = item.getItemLocation().getBlockLocation();
+        final UUID entityId = item.getItemLocation().getHolderId();
+        if (location == null || location.getWorld() == null || entityId == null) {
+            return null;
+        }
+
+        for (final Item dropped : location.getWorld().getEntitiesByClass(Item.class)) {
+            if (entityId.equals(dropped.getUniqueId()) && !dropped.isDead()
+                    && this.matches(dropped.getItemStack(), item.getUuid())) {
+                return dropped;
+            }
+        }
+        return null;
     }
 
     private boolean matches(final ItemStack stack, final String uuid) {

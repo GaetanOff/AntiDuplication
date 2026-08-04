@@ -28,6 +28,8 @@ import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -59,6 +61,7 @@ public final class ItemManager {
     private final AtomicLong duplicationsDetected = new AtomicLong();
     private final AtomicLong itemsRemoved = new AtomicLong();
     private final AtomicLong removalsSkipped = new AtomicLong();
+    private final AtomicLong ghostDuplications = new AtomicLong();
 
     public ItemManager(final AntiDuplicationPlugin plugin, final ConfigManager config, final JsonLogger logger) {
         this.plugin = plugin;
@@ -173,9 +176,20 @@ public final class ItemManager {
     }
 
     private int applyDuplicationEvent(final DuplicationEvent event) {
+        final List<TrackedItem> live = this.confirmStillDuplicated(event);
+        if (live.isEmpty()) {
+            return 0;
+        }
+
+        final TrackedItem retained = live.contains(event.getRetainedItem())
+                ? event.getRetainedItem() : live.get(0);
+
         int removed = 0;
         int skipped = 0;
-        for (final TrackedItem copy : event.getItemsToRemove()) {
+        for (final TrackedItem copy : live) {
+            if (copy.equals(retained)) {
+                continue;
+            }
             if (this.itemRemover.remove(copy).isRemoved()) {
                 removed++;
             } else {
@@ -199,9 +213,39 @@ public final class ItemManager {
 
         this.plugin.getLogger().warning(String.format(
                 "Duplication handled: UUID %s, %d copies removed, %d skipped, kept %s",
-                event.getDuplicatedUuid(), removed, skipped,
-                event.getRetainedItem().getLocationDescription()));
+                event.getDuplicatedUuid(), removed, skipped, retained.getLocationDescription()));
         return removed;
+    }
+
+    /**
+     * Re-checks every reported copy against the live world.
+     *
+     * <p>The sweep spans several ticks, so an item carried from a player's
+     * inventory to a chest between two slices is recorded in both and looks
+     * duplicated. An item can only be in one place at a time, so re-checking here
+     * — on the main thread, immediately before acting — leaves at most as many
+     * copies as really exist. Fewer than two means the duplication was a ghost.
+     *
+     * @return the copies that are genuinely present, or an empty list when there
+     *         is no duplication to act on
+     */
+    private List<TrackedItem> confirmStillDuplicated(final DuplicationEvent event) {
+        final List<TrackedItem> live = new ArrayList<>(event.getDuplicateCount());
+        for (final TrackedItem copy : event.getDuplicatedItems()) {
+            if (this.itemRemover.stillPresent(copy)) {
+                live.add(copy);
+            }
+        }
+
+        if (live.size() < 2) {
+            this.ghostDuplications.incrementAndGet();
+            this.plugin.debug(String.format(
+                    "UUID %s is no longer duplicated (%d of %d copies still present); "
+                            + "the item moved while the scan was running",
+                    event.getDuplicatedUuid(), live.size(), event.getDuplicateCount()));
+            return Collections.emptyList();
+        }
+        return live;
     }
 
     private void notifyAdministrators(final DuplicationEvent event) {
@@ -249,6 +293,14 @@ public final class ItemManager {
         return this.removalsSkipped.get();
     }
 
+    /**
+     * @return reported duplications that turned out to be one item observed twice
+     *         while it was being moved
+     */
+    public long getGhostDuplications() {
+        return this.ghostDuplications.get();
+    }
+
     public int getActiveRegistrySize() {
         return this.owners.size();
     }
@@ -269,6 +321,7 @@ public final class ItemManager {
         report.append("Duplications detected: ").append(this.duplicationsDetected.get()).append("\n");
         report.append("Copies removed: ").append(this.itemsRemoved.get()).append("\n");
         report.append("Removals skipped (item moved): ").append(this.removalsSkipped.get()).append("\n");
+        report.append("Reports dismissed after re-check: ").append(this.ghostDuplications.get()).append("\n");
         report.append("Known UUIDs: ").append(this.owners.size()).append("\n");
         report.append("Pending stack divisions: ").append(this.divisionTracker.size()).append("\n");
         report.append(this.stackManager.generateStackStats()).append("\n");

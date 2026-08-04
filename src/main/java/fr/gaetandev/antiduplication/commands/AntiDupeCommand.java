@@ -141,6 +141,8 @@ public final class AntiDupeCommand implements CommandExecutor, TabCompleter {
                 + this.itemManager.getItemsRemoved());
         sender.sendMessage(ChatColor.WHITE + "Removals skipped: " + ChatColor.GRAY
                 + this.itemManager.getRemovalsSkipped() + " (item had moved)");
+        sender.sendMessage(ChatColor.WHITE + "Reports dismissed on re-check: " + ChatColor.GRAY
+                + this.itemManager.getGhostDuplications());
         sender.sendMessage(ChatColor.WHITE + "Known UUIDs: " + ChatColor.BLUE
                 + this.itemManager.getActiveRegistrySize());
         sender.sendMessage(ChatColor.WHITE + "Scanner: " + ChatColor.AQUA
