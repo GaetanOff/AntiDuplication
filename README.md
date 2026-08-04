@@ -6,14 +6,14 @@
 
 ## 📌 Features
 
-✅ **Unique UUIDs** – Every tracked item gets a unique identifier stored in its item data
-✅ **Automatic detection** – Periodic scans of players, containers and dropped items
-✅ **Safe removal** – Extra copies are deleted, the original is kept
-✅ **Comprehensive logging** – Newline-delimited JSON logs for full traceability
-✅ **Optimized performance** – Bounded main-thread work per tick, analysis off-thread
-✅ **Strict mode** – Oversized stacks trimmed, suspicious actions logged
-✅ **Creative monitoring** – Tracks item creation in Creative Mode and via commands
-✅ **Cross-server detection** – Optional Redis registry shared across a network
+✅ **Unique UUIDs** – Every tracked item gets a unique identifier stored in its item data  
+✅ **Automatic detection** – Periodic scans of players, containers and dropped items  
+✅ **Safe removal** – Extra copies are deleted, the original is kept  
+✅ **Comprehensive logging** – Newline-delimited JSON logs for full traceability  
+✅ **Optimized performance** – Bounded main-thread work per tick, analysis off-thread  
+✅ **Strict mode** – Oversized stacks trimmed, suspicious actions logged  
+✅ **Creative monitoring** – Tracks item creation in Creative Mode and via commands  
+✅ **Cross-server detection** – Optional Redis registry shared across a network  
 
 ---
 
