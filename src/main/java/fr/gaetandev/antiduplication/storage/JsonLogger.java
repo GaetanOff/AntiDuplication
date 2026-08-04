@@ -23,9 +23,11 @@ import com.google.gson.JsonObject;
 import fr.gaetandev.antiduplication.AntiDuplicationPlugin;
 import fr.gaetandev.antiduplication.config.ConfigManager;
 import fr.gaetandev.antiduplication.model.DuplicationEvent;
+import fr.gaetandev.antiduplication.model.ItemLocation;
 import fr.gaetandev.antiduplication.model.TrackedItem;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -34,39 +36,62 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
+import java.util.stream.Stream;
 
+/**
+ * Writes an audit trail of duplication events as newline-delimited JSON.
+ *
+ * <p>One compact object per line, which is what makes the files streamable and
+ * appendable — a pretty printed object spanning several lines could not be
+ * appended to safely, and a single top level array would have to be rewritten on
+ * every event.
+ *
+ * <p>Entries are queued and flushed by a dedicated thread in batches, so the game
+ * threads never touch the disk. The queue is bounded: under a flood, dropping
+ * entries (and saying so) is preferable to exhausting the heap.
+ */
 public final class JsonLogger {
+
+    /** Bounded so a duplication storm cannot exhaust the heap. */
+    private static final int QUEUE_CAPACITY = 10_000;
+
+    /** Entries written per disk round trip. */
+    private static final int FLUSH_BATCH_SIZE = 256;
+
+    /** How long the writer waits for more entries before flushing what it has. */
+    private static final long POLL_TIMEOUT_MILLIS = 500L;
 
     private final AntiDuplicationPlugin plugin;
     private final ConfigManager config;
     private final Gson gson;
     private final Path logDirectory;
 
-    private final BlockingQueue<LogEntry> logQueue;
+    private final BlockingQueue<LogEntry> logQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
+    private final AtomicBoolean running = new AtomicBoolean(true);
+    private final AtomicLong droppedEntries = new AtomicLong();
+    private final AtomicLong writtenEntries = new AtomicLong();
     private final Thread loggerThread;
-    private final AtomicBoolean running;
 
     private final DateTimeFormatter fileNameFormatter;
-    private final DateTimeFormatter timestampFormatter;
+    private final DateTimeFormatter timestampFormatter = DateTimeFormatter.ISO_INSTANT;
 
     public JsonLogger(final AntiDuplicationPlugin plugin, final ConfigManager config) {
         this.plugin = plugin;
         this.config = config;
-        this.logQueue = new LinkedBlockingQueue<>();
-        this.running = new AtomicBoolean(true);
 
-        this.gson = new GsonBuilder()
-                .setPrettyPrinting()
-                .setDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
-                .create();
-
-        this.fileNameFormatter = DateTimeFormatter.ofPattern(config.getRawConfig().getString("logging.filename-format", "yyyy-MM-dd"));
-        this.timestampFormatter = DateTimeFormatter.ISO_INSTANT;
-
+        // Compact on purpose: one JSON document per line.
+        this.gson = new GsonBuilder().disableHtmlEscaping().create();
+        this.fileNameFormatter = resolveFileNameFormatter(plugin, config.getLogFilenameFormat());
         this.logDirectory = Paths.get(plugin.getDataFolder().getAbsolutePath(), config.getLogDirectory());
         this.createLogDirectory();
 
@@ -74,14 +99,24 @@ public final class JsonLogger {
         this.loggerThread.setDaemon(true);
         this.loggerThread.start();
 
-        plugin.getLogger().info("JsonLogger initialized - Directory: " + this.logDirectory.toAbsolutePath());
+        plugin.getLogger().info("JsonLogger writing to " + this.logDirectory.toAbsolutePath());
+    }
+
+    private static DateTimeFormatter resolveFileNameFormatter(final AntiDuplicationPlugin plugin, final String pattern) {
+        try {
+            return DateTimeFormatter.ofPattern(pattern);
+        } catch (final IllegalArgumentException e) {
+            plugin.getLogger().warning("Invalid logging.filename-format '" + pattern
+                    + "', falling back to yyyy-MM-dd");
+            return DateTimeFormatter.ofPattern("yyyy-MM-dd");
+        }
     }
 
     private void createLogDirectory() {
         try {
             Files.createDirectories(this.logDirectory);
         } catch (final IOException e) {
-            this.plugin.getLogger().log(Level.SEVERE, "Failed to create log directory", e);
+            this.plugin.getLogger().log(Level.SEVERE, "Failed to create the log directory", e);
         }
     }
 
@@ -89,53 +124,45 @@ public final class JsonLogger {
         if (!this.config.isLoggingEnabled()) {
             return;
         }
-
         try {
-            final JsonObject jsonEvent = this.createDuplicationJson(event);
-
-            final LogEntry entry = new LogEntry(
-                    LogEntry.Type.DUPLICATION,
-                    jsonEvent,
-                    event.getDetectionTime()
-            );
-
-            if (!this.logQueue.offer(entry)) {
-                this.plugin.getLogger().warning("Log queue full, event ignored");
-            }
-
-        } catch (final Exception e) {
-            this.plugin.getLogger().log(Level.SEVERE, "Error while creating JSON log", e);
+            this.enqueue(new LogEntry(this.createDuplicationJson(event), event.getDetectionTime()));
+        } catch (final RuntimeException e) {
+            this.plugin.getLogger().log(Level.SEVERE, "Error building the duplication log entry", e);
         }
     }
 
+    /**
+     * Records a free form event, used by the security monitors.
+     */
     public void logEvent(final String type, final Object data) {
         if (!this.config.isLoggingEnabled()) {
             return;
         }
-
         try {
-            final JsonObject jsonEvent = new JsonObject();
-            jsonEvent.addProperty("type", type);
-            jsonEvent.addProperty("timestamp", Instant.now().toString());
-            jsonEvent.add("data", this.gson.toJsonTree(data));
+            final Instant now = Instant.now();
+            final JsonObject json = new JsonObject();
+            json.addProperty("event_type", type);
+            json.addProperty("timestamp", this.timestampFormatter.format(now));
+            json.add("data", this.gson.toJsonTree(data));
+            this.enqueue(new LogEntry(json, now));
+        } catch (final RuntimeException e) {
+            this.plugin.getLogger().log(Level.WARNING, "Error building a log entry", e);
+        }
+    }
 
-            final LogEntry entry = new LogEntry(
-                    LogEntry.Type.GENERAL,
-                    jsonEvent,
-                    Instant.now()
-            );
-
-            this.logQueue.offer(entry);
-
-        } catch (final Exception e) {
-            this.plugin.getLogger().log(Level.WARNING, "Error during generic logging", e);
+    private void enqueue(final LogEntry entry) {
+        if (!this.logQueue.offer(entry)) {
+            final long dropped = this.droppedEntries.incrementAndGet();
+            // Only shout on the first drop and then every thousand, so a flood
+            // does not turn into a console flood of its own.
+            if (dropped == 1 || dropped % 1000 == 0) {
+                this.plugin.getLogger().warning("Log queue saturated, " + dropped + " entries dropped so far");
+            }
         }
     }
 
     private JsonObject createDuplicationJson(final DuplicationEvent event) {
         final JsonObject json = new JsonObject();
-
-        // Basic information
         json.addProperty("event_type", "item_duplication");
         json.addProperty("timestamp", this.timestampFormatter.format(event.getDetectionTime()));
         json.addProperty("uuid", event.getDuplicatedUuid());
@@ -145,153 +172,172 @@ public final class JsonLogger {
         json.addProperty("detection_method", event.getDetectionMethod());
         json.addProperty("scan_duration_ms", event.getScanDurationMs());
 
-        if (event.getAdditionalInfo() != null) {
+        if (event.getAdditionalInfo() != null && !event.getAdditionalInfo().isEmpty()) {
             json.addProperty("additional_info", event.getAdditionalInfo());
         }
 
         final JsonArray itemsArray = new JsonArray();
         for (final TrackedItem item : event.getDuplicatedItems()) {
             final JsonObject itemJson = this.createTrackedItemJson(item);
+            itemJson.addProperty("retained", item.equals(event.getRetainedItem()));
             itemsArray.add(itemJson);
         }
         json.add("duplicated_items", itemsArray);
+        json.add("server_info", this.createServerInfoJson());
+        return json;
+    }
 
+    private JsonObject createServerInfoJson() {
         final JsonObject serverInfo = new JsonObject();
         serverInfo.addProperty("server_version", this.plugin.getServer().getVersion());
         serverInfo.addProperty("online_players", this.plugin.getServer().getOnlinePlayers().size());
         serverInfo.addProperty("plugin_version", this.plugin.getDescription().getVersion());
-        json.add("server_info", serverInfo);
-
-        return json;
+        return serverInfo;
     }
 
     private JsonObject createTrackedItemJson(final TrackedItem item) {
         final JsonObject json = new JsonObject();
-
         json.addProperty("uuid", item.getUuid());
         json.addProperty("material", item.getMaterial().name());
         json.addProperty("amount", item.getAmount());
         json.addProperty("durability", item.getDurability());
-        json.addProperty("container", item.getContainer());
 
+        final ItemLocation location = item.getItemLocation();
+        json.addProperty("location_kind", location.getKind().name());
+        json.addProperty("container", item.getContainer());
+        json.addProperty("location_description", item.getLocationDescription());
+        if (location.getSlot() != ItemLocation.NO_SLOT) {
+            json.addProperty("slot", location.getSlot());
+        }
         if (item.getDisplayName() != null) {
             json.addProperty("display_name", item.getDisplayName());
         }
-
         if (item.getPlayerName() != null) {
             json.addProperty("player_name", item.getPlayerName());
         }
-
-        if (item.getLocation() != null) {
+        if (location.getHolderId() != null) {
+            json.addProperty("holder_id", location.getHolderId().toString());
+        }
+        if (location.getBlockLocation() != null && location.getBlockLocation().getWorld() != null) {
             final JsonObject locationJson = new JsonObject();
-            locationJson.addProperty("world", item.getLocation().getWorld().getName());
-            locationJson.addProperty("x", item.getLocation().getBlockX());
-            locationJson.addProperty("y", item.getLocation().getBlockY());
-            locationJson.addProperty("z", item.getLocation().getBlockZ());
+            locationJson.addProperty("world", location.getBlockLocation().getWorld().getName());
+            locationJson.addProperty("x", location.getBlockLocation().getBlockX());
+            locationJson.addProperty("y", location.getBlockLocation().getBlockY());
+            locationJson.addProperty("z", location.getBlockLocation().getBlockZ());
             json.add("location", locationJson);
         }
 
         json.addProperty("first_seen", this.timestampFormatter.format(item.getFirstSeen()));
         json.addProperty("last_seen", this.timestampFormatter.format(item.getLastSeen()));
-        json.addProperty("location_description", item.getLocationDescription());
-
         return json;
     }
 
     private void loggerWorker() {
-        this.plugin.getLogger().info("Logging thread started");
-
         while (this.running.get()) {
             try {
-                final LogEntry entry = this.logQueue.take(); // Blocking
-                this.writeLogEntry(entry);
-
+                final LogEntry first = this.logQueue.poll(POLL_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+                if (first == null) {
+                    continue;
+                }
+                final List<LogEntry> batch = new ArrayList<>(FLUSH_BATCH_SIZE);
+                batch.add(first);
+                this.logQueue.drainTo(batch, FLUSH_BATCH_SIZE - 1);
+                this.writeBatch(batch);
             } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
-            } catch (final Exception e) {
-                this.plugin.getLogger().log(Level.SEVERE, "Error in logging thread", e);
+            } catch (final RuntimeException e) {
+                this.plugin.getLogger().log(Level.SEVERE, "Error in the logging thread", e);
             }
         }
-
-        // Empty queue before closing
         this.flushRemainingLogs();
-        this.plugin.getLogger().info("Logging thread stopped");
     }
 
-    private void writeLogEntry(final LogEntry entry) {
-        try {
-            final Path logFile = this.getLogFile(entry.getTimestamp());
-
-            final String jsonLine = this.gson.toJson(entry.getJsonData()) + "\n";
-
-            // Atomic write
-            Files.write(logFile, jsonLine.getBytes(),
-                    StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-
-        } catch (final IOException e) {
-            this.plugin.getLogger().log(Level.SEVERE, "Error writing to log file", e);
+    /**
+     * Groups a batch by target file so each file is opened once per flush.
+     */
+    private void writeBatch(final List<LogEntry> batch) {
+        final Map<Path, StringBuilder> byFile = new HashMap<>();
+        for (final LogEntry entry : batch) {
+            byFile.computeIfAbsent(this.getLogFile(entry.timestamp), path -> new StringBuilder())
+                    .append(this.gson.toJson(entry.jsonData))
+                    .append(System.lineSeparator());
         }
+
+        for (final Map.Entry<Path, StringBuilder> file : byFile.entrySet()) {
+            try {
+                Files.write(file.getKey(), file.getValue().toString().getBytes(StandardCharsets.UTF_8),
+                        StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            } catch (final IOException e) {
+                this.plugin.getLogger().log(Level.SEVERE, "Error writing to " + file.getKey(), e);
+            }
+        }
+        this.writtenEntries.addAndGet(batch.size());
     }
 
     private Path getLogFile(final Instant timestamp) {
         final LocalDate date = timestamp.atZone(ZoneId.systemDefault()).toLocalDate();
-        final String fileName = date.format(this.fileNameFormatter) + ".json";
-        return this.logDirectory.resolve(fileName);
+        return this.logDirectory.resolve(date.format(this.fileNameFormatter) + ".json");
     }
 
     private void flushRemainingLogs() {
-        LogEntry entry;
-        while ((entry = this.logQueue.poll()) != null) {
-            try {
-                this.writeLogEntry(entry);
-            } catch (final Exception e) {
-                this.plugin.getLogger().log(Level.WARNING, "Error while flushing logs", e);
-            }
+        final List<LogEntry> remaining = new ArrayList<>();
+        this.logQueue.drainTo(remaining);
+        if (!remaining.isEmpty()) {
+            this.writeBatch(remaining);
         }
     }
 
+    /**
+     * Stops the writer, flushing whatever is still queued.
+     */
     public void close() {
-        this.running.set(false);
-
-        if (this.loggerThread != null) {
-            this.loggerThread.interrupt();
-            try {
-                this.loggerThread.join(5000);
-            } catch (final InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
+        if (!this.running.compareAndSet(true, false)) {
+            return;
         }
+        try {
+            // The writer polls with a timeout, so it notices the flag on its own
+            // and gets to flush; interrupting would abort the flush.
+            this.loggerThread.join(TimeUnit.SECONDS.toMillis(5));
+            if (this.loggerThread.isAlive()) {
+                this.loggerThread.interrupt();
+            }
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        this.flushRemainingLogs();
 
-        this.plugin.getLogger().info("JsonLogger closed");
+        this.plugin.getLogger().info(String.format("JsonLogger closed: %d entries written, %d dropped",
+                this.writtenEntries.get(), this.droppedEntries.get()));
     }
 
+    /**
+     * Deletes log files older than {@code logging.rotation-days}.
+     */
     public void cleanupOldLogs() {
-        if (this.config.getLogRotationDays() <= 0) {
+        final int rotationDays = this.config.getLogRotationDays();
+        if (rotationDays <= 0) {
             return;
         }
 
-        try {
-            final LocalDate cutoffDate = LocalDate.now().minusDays(this.config.getLogRotationDays());
-
-            Files.list(this.logDirectory)
-                    .filter(Files::isRegularFile)
-                    .filter(path -> path.toString().endsWith(".json"))
+        final LocalDate cutoffDate = LocalDate.now().minusDays(rotationDays);
+        try (Stream<Path> files = Files.list(this.logDirectory)) {
+            files.filter(Files::isRegularFile)
+                    .filter(path -> path.getFileName().toString().endsWith(".json"))
                     .filter(path -> this.isOlderThan(path, cutoffDate))
                     .forEach(this::deleteLogFile);
-
         } catch (final IOException e) {
-            this.plugin.getLogger().log(Level.WARNING, "Error during log cleanup", e);
+            this.plugin.getLogger().log(Level.WARNING, "Error during log rotation", e);
         }
     }
 
     private boolean isOlderThan(final Path logFile, final LocalDate cutoffDate) {
+        final String fileName = logFile.getFileName().toString();
+        final String dateStr = fileName.substring(0, fileName.length() - ".json".length());
         try {
-            final String fileName = logFile.getFileName().toString();
-            final String dateStr = fileName.replace(".json", "");
-            final LocalDate fileDate = LocalDate.parse(dateStr, this.fileNameFormatter);
-            return fileDate.isBefore(cutoffDate);
-        } catch (final Exception e) {
+            return LocalDate.parse(dateStr, this.fileNameFormatter).isBefore(cutoffDate);
+        } catch (final RuntimeException e) {
+            // A file whose name is not a date is not ours to delete.
             return false;
         }
     }
@@ -299,37 +345,31 @@ public final class JsonLogger {
     private void deleteLogFile(final Path logFile) {
         try {
             Files.delete(logFile);
-            this.plugin.getLogger().info("Old log file deleted: " + logFile.getFileName());
+            this.plugin.getLogger().info("Rotated out old log file " + logFile.getFileName());
         } catch (final IOException e) {
             this.plugin.getLogger().log(Level.WARNING, "Failed to delete " + logFile, e);
         }
     }
 
-    private static final class LogEntry {
-        enum Type {
-            DUPLICATION, GENERAL
-        }
+    public long getWrittenEntries() {
+        return this.writtenEntries.get();
+    }
 
-        private final Type type;
+    public long getDroppedEntries() {
+        return this.droppedEntries.get();
+    }
+
+    public int getQueuedEntries() {
+        return this.logQueue.size();
+    }
+
+    private static final class LogEntry {
         private final JsonObject jsonData;
         private final Instant timestamp;
 
-        LogEntry(final Type type, final JsonObject jsonData, final Instant timestamp) {
-            this.type = type;
+        LogEntry(final JsonObject jsonData, final Instant timestamp) {
             this.jsonData = jsonData;
             this.timestamp = timestamp;
-        }
-
-        public Type getType() {
-            return this.type;
-        }
-
-        public JsonObject getJsonData() {
-            return this.jsonData;
-        }
-
-        public Instant getTimestamp() {
-            return this.timestamp;
         }
     }
 }
