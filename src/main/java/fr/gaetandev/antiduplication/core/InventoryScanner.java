@@ -24,6 +24,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
 import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.Rotation;
 import org.bukkit.World;
 import org.bukkit.block.BlockState;
 import org.bukkit.block.Chest;
@@ -353,7 +354,12 @@ public final class InventoryScanner {
         if (outcome == StackOutcome.DELETE) {
             frame.setItem(null);
         } else if (outcome == StackOutcome.MODIFIED) {
+            // Putting an item back resets how it is turned, so the orientation the
+            // builder chose is restored: stamping a UUID must not visibly rotate
+            // decoration.
+            final Rotation rotation = frame.getRotation();
             frame.setItem(displayed);
+            frame.setRotation(rotation);
         }
     }
 

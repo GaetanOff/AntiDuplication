@@ -152,8 +152,10 @@ public final class AntiDupeCommand implements CommandExecutor, TabCompleter {
         sender.sendMessage(ChatColor.WHITE + "Detector: " + ChatColor.LIGHT_PURPLE
                 + this.threadManager.getDetector().getPerformanceReport());
         sender.sendMessage(ChatColor.WHITE + "Threads: " + ChatColor.AQUA + this.threadManager.getThreadStats());
-        sender.sendMessage(ChatColor.WHITE + "Scan interval: " + ChatColor.AQUA
-                + this.plugin.getConfigManager().getScanInterval() + "s");
+        sender.sendMessage(ChatColor.WHITE + "Cadence: " + ChatColor.AQUA
+                + "players every " + this.plugin.getConfigManager().getScanInterval() + "s, chunks "
+                + (this.plugin.getConfigManager().isContainerScanEnabled()
+                ? "every " + this.plugin.getConfigManager().getContainerInterval() + "s" : "never"));
         return true;
     }
 

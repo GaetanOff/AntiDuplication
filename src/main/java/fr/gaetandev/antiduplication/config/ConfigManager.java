@@ -308,11 +308,12 @@ public final class ConfigManager {
     }
 
     /**
-     * @return how long a shared claim survives; must comfortably exceed the scan
-     *         interval or servers would keep losing their own claims
+     * @return how long a shared claim survives; kept above the slowest sweep
+     *         cadence so a server never loses a claim on an item it still holds
      */
     public int getRedisTtlSeconds() {
-        return Math.max(this.redisTtlSeconds, this.scanInterval * 4);
+        final int slowestCadence = Math.max(this.scanInterval, this.containerInterval);
+        return Math.max(this.redisTtlSeconds, slowestCadence * 4);
     }
 
     public boolean isStrictMode() {

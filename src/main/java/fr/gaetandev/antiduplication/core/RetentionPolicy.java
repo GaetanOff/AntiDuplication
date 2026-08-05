@@ -43,7 +43,7 @@ final class RetentionPolicy {
      * the ground), then orders by holder and slot so the outcome does not depend
      * on which order the sweep happened to visit things in.
      */
-    static final Comparator<TrackedItem> RETENTION_ORDER = new Comparator<TrackedItem>() {
+    private static final Comparator<TrackedItem> RETENTION_ORDER = new Comparator<TrackedItem>() {
         @Override
         public int compare(final TrackedItem left, final TrackedItem right) {
             final ItemLocation leftLocation = left.getItemLocation();
