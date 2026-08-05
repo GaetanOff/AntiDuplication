@@ -91,5 +91,55 @@ class ItemLocationTest {
         assertThat(ItemLocation.Kind.PLAYER_CURSOR.isPlayerHeld()).isTrue();
         assertThat(ItemLocation.Kind.CONTAINER.isPlayerHeld()).isFalse();
         assertThat(ItemLocation.Kind.GROUND.isPlayerHeld()).isFalse();
+        assertThat(ItemLocation.Kind.ENTITY_CONTAINER.isPlayerHeld()).isFalse();
+    }
+
+    @Test
+    @DisplayName("Entity held kinds are the ones addressed by entity id")
+    void testIsEntityHeld() {
+        assertThat(ItemLocation.Kind.ENTITY_CONTAINER.isEntityHeld()).isTrue();
+        assertThat(ItemLocation.Kind.ENTITY_EQUIPMENT.isEntityHeld()).isTrue();
+        assertThat(ItemLocation.Kind.ENTITY_HELD.isEntityHeld()).isTrue();
+        assertThat(ItemLocation.Kind.GROUND.isEntityHeld()).isTrue();
+        assertThat(ItemLocation.Kind.PLAYER_INVENTORY.isEntityHeld()).isFalse();
+        assertThat(ItemLocation.Kind.CONTAINER.isEntityHeld()).isFalse();
+    }
+
+    @Test
+    @DisplayName("Items carried by one entity share an owner, whatever the slot or kind")
+    void testEntityOwnerKey() {
+        final ItemLocation cartSlotOne = ItemLocation.ofEntity(
+                ItemLocation.Kind.ENTITY_CONTAINER, PLAYER_ID, "MINECART_CHEST", null, 1);
+        final ItemLocation cartSlotFive = ItemLocation.ofEntity(
+                ItemLocation.Kind.ENTITY_CONTAINER, PLAYER_ID, "MINECART_CHEST", null, 5);
+        final ItemLocation wornByTheSameId = ItemLocation.ofEntity(
+                ItemLocation.Kind.ENTITY_EQUIPMENT, PLAYER_ID, "ARMOR_STAND", null, 1);
+
+        assertThat(cartSlotOne.getOwnerKey()).isEqualTo(cartSlotFive.getOwnerKey());
+        // A different kind of holding is a different holder, even on one entity.
+        assertThat(cartSlotOne.getOwnerKey()).isNotEqualTo(wornByTheSameId.getOwnerKey());
+    }
+
+    @Test
+    @DisplayName("Descriptions read well for entity holders")
+    void testDescribeEntities() {
+        assertThat(ItemLocation.ofEntity(
+                ItemLocation.Kind.ENTITY_EQUIPMENT, PLAYER_ID, "ARMOR_STAND", null, 2).describe())
+                .isEqualTo("ARMOR_STAND (Entity equipment, slot 2) at unknown position");
+        assertThat(ItemLocation.ofEntity(
+                ItemLocation.Kind.ENTITY_HELD, PLAYER_ID, "ITEM_FRAME", null, ItemLocation.NO_SLOT).describe())
+                .isEqualTo("ITEM_FRAME (Displayed item) at unknown position");
+    }
+
+    @Test
+    @DisplayName("The owner key is stable across calls")
+    void testOwnerKeyIsStable() {
+        final ItemLocation location = ItemLocation.ofPlayer(
+                ItemLocation.Kind.PLAYER_INVENTORY, PLAYER_ID, "Alice", 1);
+
+        final String first = location.getOwnerKey();
+
+        assertThat(location.getOwnerKey()).isEqualTo(first);
+        assertThat(location.getOwnerKey()).isSameAs(first);
     }
 }

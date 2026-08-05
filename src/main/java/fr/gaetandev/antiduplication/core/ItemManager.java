@@ -54,6 +54,11 @@ public final class ItemManager {
      * Last known holder of each UUID. This is what lets the plugin tell the
      * original from the copies: whichever copy sits where the UUID was already
      * seen is the one that gets to stay.
+     *
+     * <p>Bounded in practice by {@code performance.cache-ttl} rather than by a
+     * hard cap: entries are dropped once unseen for that long, so the map settles
+     * around the set of items actually in circulation. A hard cap would evict
+     * arbitrary entries and lose exactly the history this exists to keep.
      */
     private final Map<String, OwnerRecord> owners = new ConcurrentHashMap<>();
 
@@ -152,6 +157,13 @@ public final class ItemManager {
      */
     void rememberOwner(final String uuid, final String ownerKey) {
         if (!this.config.shouldCacheResults()) {
+            return;
+        }
+        // Called once per tracked item on every scan, and the owner is unchanged
+        // nearly every time; refreshing in place keeps that case to a lock-free
+        // read instead of a map write plus an allocation.
+        final OwnerRecord existing = this.owners.get(uuid);
+        if (existing != null && existing.refreshIfHeldBy(ownerKey)) {
             return;
         }
         this.owners.put(uuid, new OwnerRecord(ownerKey));
@@ -346,14 +358,30 @@ public final class ItemManager {
 
     /**
      * Where a UUID was last seen, with the timestamp used for expiry.
+     *
+     * <p>The holder is fixed for the life of the record; only the timestamp moves,
+     * and it is volatile because scans refresh it from a worker thread while
+     * housekeeping reads it from another.
      */
     private static final class OwnerRecord {
         private final String ownerKey;
-        private final long seenAt;
+        private volatile long seenAt;
 
         OwnerRecord(final String ownerKey) {
             this.ownerKey = ownerKey;
             this.seenAt = System.currentTimeMillis();
+        }
+
+        /**
+         * @return {@code true} when the holder still matches, in which case the
+         *         record was refreshed and needs no replacement
+         */
+        boolean refreshIfHeldBy(final String candidateOwnerKey) {
+            if (!this.ownerKey.equals(candidateOwnerKey)) {
+                return false;
+            }
+            this.seenAt = System.currentTimeMillis();
+            return true;
         }
 
         boolean isExpired(final long ttlMillis) {

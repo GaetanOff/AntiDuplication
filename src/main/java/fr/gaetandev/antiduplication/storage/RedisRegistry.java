@@ -228,7 +228,11 @@ public final class RedisRegistry {
         return (ip == null || ip.isEmpty() ? "server" : ip) + ':' + port;
     }
 
-    private static List<List<String>> partition(final Collection<String> values) {
+    /**
+     * Splits the work into pipeline-sized batches, so a scan holding tens of
+     * thousands of UUIDs does not turn into one enormous round trip.
+     */
+    static List<List<String>> partition(final Collection<String> values) {
         final List<List<String>> batches = new ArrayList<>();
         List<String> current = null;
         for (final String value : values) {
