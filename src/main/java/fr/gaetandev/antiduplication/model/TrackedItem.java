@@ -19,10 +19,19 @@ package fr.gaetandev.antiduplication.model;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.ItemMeta;
 
 import java.time.Instant;
 import java.util.Objects;
 
+/**
+ * Immutable snapshot of one item instance observed during a scan.
+ *
+ * <p>Two instances are the same tracked item only when they share a UUID
+ * <em>and</em> a location: several instances with the same UUID at different
+ * locations is exactly what a duplication is, so they must stay distinct in
+ * collections.
+ */
 public final class TrackedItem {
 
     private final String uuid;
@@ -30,9 +39,7 @@ public final class TrackedItem {
     private final int amount;
     private final short durability;
     private final String displayName;
-    private final Location location;
-    private final String container;
-    private final String playerName;
+    private final ItemLocation location;
     private final Instant firstSeen;
     private final Instant lastSeen;
 
@@ -43,8 +50,6 @@ public final class TrackedItem {
         this.durability = builder.durability;
         this.displayName = builder.displayName;
         this.location = builder.location;
-        this.container = builder.container;
-        this.playerName = builder.playerName;
         this.firstSeen = builder.firstSeen;
         this.lastSeen = builder.lastSeen;
     }
@@ -69,16 +74,31 @@ public final class TrackedItem {
         return this.displayName;
     }
 
-    public Location getLocation() {
+    public ItemLocation getItemLocation() {
         return this.location;
     }
 
-    public String getContainer() {
-        return this.container;
+    /**
+     * @return the position of the container or dropped item, {@code null} for items held by a player
+     */
+    public Location getLocation() {
+        return this.location.getBlockLocation();
     }
 
+    /**
+     * @return the kind of holder, as reported in the JSON logs
+     */
+    public String getContainer() {
+        return this.location.getKind() == ItemLocation.Kind.CONTAINER
+                ? this.location.getHolderName()
+                : this.location.getKind().name();
+    }
+
+    /**
+     * @return the owning player name, or {@code null} when the item is not player held
+     */
     public String getPlayerName() {
-        return this.playerName;
+        return this.location.getKind().isPlayerHeld() ? this.location.getHolderName() : null;
     }
 
     public Instant getFirstSeen() {
@@ -90,18 +110,7 @@ public final class TrackedItem {
     }
 
     public String getLocationDescription() {
-        if (this.playerName != null) {
-            return String.format("Player %s (%s)", this.playerName, this.container);
-        } else if (this.location != null) {
-            return String.format("%s at %d,%d,%d in %s",
-                    this.container,
-                    this.location.getBlockX(),
-                    this.location.getBlockY(),
-                    this.location.getBlockZ(),
-                    this.location.getWorld().getName());
-        } else {
-            return this.container + " (unknown position)";
-        }
+        return this.location.describe();
     }
 
     public String getItemDescription() {
@@ -119,6 +128,23 @@ public final class TrackedItem {
         return desc.toString();
     }
 
+    /**
+     * Copy of this item with an earlier first-seen date, used when a UUID that
+     * was already known is observed again.
+     */
+    public TrackedItem withFirstSeen(final Instant earlier) {
+        return new Builder()
+                .uuid(this.uuid)
+                .material(this.material)
+                .amount(this.amount)
+                .durability(this.durability)
+                .displayName(this.displayName)
+                .location(this.location)
+                .firstSeen(earlier)
+                .lastSeen(this.lastSeen)
+                .build();
+    }
+
     @Override
     public boolean equals(final Object obj) {
         if (this == obj) {
@@ -128,12 +154,12 @@ public final class TrackedItem {
             return false;
         }
         final TrackedItem that = (TrackedItem) obj;
-        return Objects.equals(this.uuid, that.uuid);
+        return Objects.equals(this.uuid, that.uuid) && Objects.equals(this.location, that.location);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(this.uuid);
+        return Objects.hash(this.uuid, this.location);
     }
 
     @Override
@@ -148,9 +174,7 @@ public final class TrackedItem {
         private int amount = 1;
         private short durability = 0;
         private String displayName;
-        private Location location;
-        private String container;
-        private String playerName;
+        private ItemLocation location;
         private Instant firstSeen = Instant.now();
         private Instant lastSeen = Instant.now();
 
@@ -159,13 +183,22 @@ public final class TrackedItem {
             return this;
         }
 
+        /**
+         * Reads material, amount, durability and display name off a live stack.
+         * Must be called from the main thread.
+         */
         public Builder fromItemStack(final ItemStack itemStack) {
             if (itemStack != null && itemStack.getType() != Material.AIR) {
                 this.material = itemStack.getType();
                 this.amount = itemStack.getAmount();
                 this.durability = itemStack.getDurability();
-                if (itemStack.hasItemMeta() && itemStack.getItemMeta().hasDisplayName()) {
-                    this.displayName = itemStack.getItemMeta().getDisplayName();
+                if (itemStack.hasItemMeta()) {
+                    // getItemMeta() copies the item data every call, so it is read
+                    // once: this runs for every tracked item of every sweep.
+                    final ItemMeta meta = itemStack.getItemMeta();
+                    if (meta != null && meta.hasDisplayName()) {
+                        this.displayName = meta.getDisplayName();
+                    }
                 }
             }
             return this;
@@ -176,23 +209,23 @@ public final class TrackedItem {
             return this;
         }
 
+        public Builder amount(final int amount) {
+            this.amount = amount;
+            return this;
+        }
+
         public Builder durability(final short durability) {
             this.durability = durability;
             return this;
         }
 
-        public Builder location(final Location location) {
+        public Builder displayName(final String displayName) {
+            this.displayName = displayName;
+            return this;
+        }
+
+        public Builder location(final ItemLocation location) {
             this.location = location;
-            return this;
-        }
-
-        public Builder container(final String container) {
-            this.container = container;
-            return this;
-        }
-
-        public Builder playerName(final String playerName) {
-            this.playerName = playerName;
             return this;
         }
 
@@ -209,7 +242,7 @@ public final class TrackedItem {
         public TrackedItem build() {
             Objects.requireNonNull(this.uuid, "UUID cannot be null");
             Objects.requireNonNull(this.material, "Material cannot be null");
-            Objects.requireNonNull(this.container, "Container cannot be null");
+            Objects.requireNonNull(this.location, "Location cannot be null");
             return new TrackedItem(this);
         }
     }

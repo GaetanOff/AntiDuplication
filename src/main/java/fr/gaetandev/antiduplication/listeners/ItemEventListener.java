@@ -21,258 +21,325 @@ import fr.gaetandev.antiduplication.config.ConfigManager;
 import fr.gaetandev.antiduplication.core.ItemManager;
 import org.bukkit.GameMode;
 import org.bukkit.Material;
+import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.inventory.CraftItemEvent;
 import org.bukkit.event.inventory.InventoryAction;
 import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryCreativeEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
+import org.bukkit.event.inventory.InventoryMoveItemEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerPickupItemEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.PlayerInventory;
 
-import java.util.HashMap;
-import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
 
+/**
+ * Stamps items as they enter the game and records the actions worth auditing.
+ *
+ * <p>Rather than trying to mutate the right {@link ItemStack} inside each event —
+ * which is a guessing game across click types, and outright wrong for stacks the
+ * server owns, such as a recipe result — the listener schedules a stamping pass
+ * over the affected player's inventory on the next tick. By then the server has
+ * finished moving items around, every stack is the real one, and a single pass
+ * covers all the cases. Passes are debounced per player, so a burst of clicks
+ * costs one pass.
+ */
 public final class ItemEventListener implements Listener {
 
     private final AntiDuplicationPlugin plugin;
     private final ItemManager itemManager;
     private final ConfigManager config;
 
-    private final Map<String, StackInfo> playerStackCache = new HashMap<>();
+    /** Players with a stamping pass already scheduled for the next tick. */
+    private final Set<UUID> pendingStampPasses = ConcurrentHashMap.newKeySet();
 
-    public ItemEventListener(final AntiDuplicationPlugin plugin, final ItemManager itemManager, final ConfigManager config) {
+    public ItemEventListener(final AntiDuplicationPlugin plugin, final ItemManager itemManager,
+                             final ConfigManager config) {
         this.plugin = plugin;
         this.itemManager = itemManager;
         this.config = config;
     }
 
-    @EventHandler(priority = EventPriority.MONITOR)
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onPlayerJoin(final PlayerJoinEvent event) {
-        this.plugin.getServer().getScheduler().runTaskAsynchronously(this.plugin, () -> {
-            try {
-                for (final ItemStack item : event.getPlayer().getInventory().getContents()) {
-                    if (item != null) {
-                        this.itemManager.assignUUIDIfNeeded(item);
-                    }
-                }
-                this.plugin.getLogger().fine("Items initialized for " + event.getPlayer().getName());
-            } catch (final Exception e) {
-                this.plugin.getLogger().log(Level.WARNING,
-                        "Error initializing items for " + event.getPlayer().getName(), e);
-            }
-        });
+        this.scheduleStampPass(event.getPlayer());
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
+    public void onPlayerQuit(final PlayerQuitEvent event) {
+        this.pendingStampPasses.remove(event.getPlayer().getUniqueId());
+    }
+
+    /**
+     * The crafting result must never be stamped through {@code getRecipe()}: that
+     * object is the server's shared recipe template, so writing a UUID on it
+     * would hand the same identifier to every future craft of that recipe and
+     * make the plugin report a duplication on each one.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onCraftItem(final CraftItemEvent event) {
-        if (event.isCancelled()) {
-            return;
-        }
-
-        try {
-            final ItemStack result = event.getRecipe().getResult();
-            if (result != null) {
-                this.itemManager.assignUUIDIfNeeded(result);
-
-                this.plugin.getLogger().finest("UUID assigned to crafted item: " + result.getType());
-            }
-        } catch (final Exception e) {
-            this.plugin.getLogger().log(Level.WARNING, "Error during crafting", e);
+        if (event.getWhoClicked() instanceof Player) {
+            this.scheduleStampPass((Player) event.getWhoClicked());
         }
     }
 
-    @EventHandler(priority = EventPriority.MONITOR)
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onItemPickup(final PlayerPickupItemEvent event) {
-        if (event.isCancelled()) {
-            return;
-        }
         try {
-            final ItemStack item = event.getItem().getItemStack();
-            if (this.itemManager.assignUUIDIfNeeded(item)) {
-                event.getItem().setItemStack(item);
+            final ItemStack stack = event.getItem().getItemStack();
+            if (this.itemManager.assignUUIDIfNeeded(stack)) {
+                event.getItem().setItemStack(stack);
             }
-            if (this.config.isStrictMode()) {
-                this.checkSuspiciousPickup(event);
+            // A pickup that does not fit leaves part of the stack on the ground,
+            // and both halves keep the same UUID.
+            if (this.config.shouldTrackStackableItems()) {
+                this.registerDivision(stack, stack.getAmount());
             }
-        } catch (final Exception e) {
-            this.plugin.getLogger().log(Level.WARNING, "Error during pickup", e);
+            this.scheduleStampPass(event.getPlayer());
+        } catch (final RuntimeException e) {
+            this.plugin.getLogger().log(Level.WARNING, "Error handling an item pickup", e);
         }
     }
 
-
-    @EventHandler(priority = EventPriority.MONITOR)
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onItemDrop(final PlayerDropItemEvent event) {
-        if (event.isCancelled()) {
-            return;
-        }
         try {
-            final ItemStack item = event.getItemDrop().getItemStack();
-            this.itemManager.assignUUIDIfNeeded(item);
-            if (this.config.shouldMonitorCreative() &&
-                    event.getPlayer().getGameMode() == GameMode.CREATIVE) {
-                this.logCreativeActivity(event);
+            final ItemStack stack = event.getItemDrop().getItemStack();
+            if (this.itemManager.assignUUIDIfNeeded(stack)) {
+                event.getItemDrop().setItemStack(stack);
             }
-        } catch (final Exception e) {
-            this.plugin.getLogger().log(Level.WARNING, "Error during drop", e);
+            if (this.config.shouldMonitorCreative() && event.getPlayer().getGameMode() == GameMode.CREATIVE) {
+                this.logCreativeAction("creative_drop", event.getPlayer(), stack);
+            }
+        } catch (final RuntimeException e) {
+            this.plugin.getLogger().log(Level.WARNING, "Error handling an item drop", e);
         }
     }
 
-    @EventHandler(priority = EventPriority.HIGHEST)
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onInventoryClick(final InventoryClickEvent event) {
-        if (event.isCancelled()) {
-            return;
-        }
         try {
-            final ItemStack currentItem = event.getCurrentItem();
-            final ItemStack cursor = event.getCursor();
-
-            this.detectStackDivision(event);
-
-            if (currentItem != null) {
-                this.itemManager.assignUUIDIfNeeded(currentItem);
+            if (this.config.shouldTrackStackableItems()) {
+                this.recordStackDivision(event);
             }
-            if (cursor != null) {
-                this.itemManager.assignUUIDIfNeeded(cursor);
+            if (this.config.isStrictMode() && event.getAction() == InventoryAction.CLONE_STACK) {
+                this.logSuspiciousAction("stack_clone", event.getWhoClicked().getName(), event.getCurrentItem());
             }
-            if (this.config.isStrictMode()) {
-                this.checkSuspiciousInventoryAction(event);
+            if (event.getWhoClicked() instanceof Player) {
+                this.scheduleStampPass((Player) event.getWhoClicked());
             }
-        } catch (final Exception e) {
-            this.plugin.getLogger().log(Level.WARNING, "Error during inventory click", e);
+        } catch (final RuntimeException e) {
+            this.plugin.getLogger().log(Level.WARNING, "Error handling an inventory click", e);
         }
     }
 
-    private void detectStackDivision(final InventoryClickEvent event) {
-        final ItemStack currentItem = event.getCurrentItem();
-        if (currentItem == null || currentItem.getType() == Material.AIR) {
+    /**
+     * A drag spreads the cursor stack over several slots without ever producing a
+     * click action, so the split has to be recorded here or the pieces would be
+     * reported as a duplication.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onInventoryDrag(final InventoryDragEvent event) {
+        try {
+            if (this.config.shouldTrackStackableItems()) {
+                final ItemStack oldCursor = event.getOldCursor();
+                if (oldCursor != null) {
+                    this.registerDivision(oldCursor, oldCursor.getAmount());
+                }
+            }
+            if (event.getWhoClicked() instanceof Player) {
+                this.scheduleStampPass((Player) event.getWhoClicked());
+            }
+        } catch (final RuntimeException e) {
+            this.plugin.getLogger().log(Level.WARNING, "Error handling an inventory drag", e);
+        }
+    }
+
+    /**
+     * Hoppers and droppers move items with no player involved, one or a few at a
+     * time out of a larger stack. The moved part and the remainder share a UUID,
+     * so the transfer is recorded as a split.
+     *
+     * <p>Returns immediately unless stackable tracking is on, because this event
+     * fires constantly on a server with hoppers.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onInventoryMoveItem(final InventoryMoveItemEvent event) {
+        if (!this.config.shouldTrackStackableItems()) {
             return;
         }
+        try {
+            final ItemStack moved = event.getItem();
+            final String uuid = this.itemManager.extractUUID(moved);
+            if (uuid == null) {
+                return;
+            }
+            this.itemManager.registerLegitimateStackDivision(uuid,
+                    moved.getAmount() + amountOf(event.getSource(), uuid));
+        } catch (final RuntimeException e) {
+            this.plugin.getLogger().log(Level.WARNING, "Error handling a container transfer", e);
+        }
+    }
 
-        final String playerName = event.getWhoClicked().getName();
+    /**
+     * @return how many items carrying {@code uuid} the inventory still holds
+     */
+    private int amountOf(final Inventory inventory, final String uuid) {
+        int total = 0;
+        final int size = inventory.getSize();
+        for (int slot = 0; slot < size; slot++) {
+            final ItemStack stack = inventory.getItem(slot);
+            if (stack != null && uuid.equals(this.itemManager.extractUUID(stack))) {
+                total += stack.getAmount();
+            }
+        }
+        return total;
+    }
+
+    /**
+     * Items conjured in the creative inventory bypass every other event, which
+     * makes this the single most useful hook for creative auditing.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onCreativeInventory(final InventoryCreativeEvent event) {
+        try {
+            if (this.config.shouldMonitorCreative() && event.getWhoClicked() instanceof Player) {
+                this.logCreativeAction("creative_set_slot", (Player) event.getWhoClicked(), event.getCursor());
+            }
+            if (event.getWhoClicked() instanceof Player) {
+                this.scheduleStampPass((Player) event.getWhoClicked());
+            }
+        } catch (final RuntimeException e) {
+            this.plugin.getLogger().log(Level.WARNING, "Error handling a creative inventory action", e);
+        }
+    }
+
+    /**
+     * Death scatters a player's items as dropped entities; stamping the survivors
+     * keeps the registry aligned with reality.
+     */
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onPlayerDeath(final PlayerDeathEvent event) {
+        try {
+            for (final ItemStack drop : event.getDrops()) {
+                this.itemManager.assignUUIDIfNeeded(drop);
+            }
+        } catch (final RuntimeException e) {
+            this.plugin.getLogger().log(Level.WARNING, "Error handling death drops", e);
+        }
+    }
+
+    /**
+     * Splitting or merging a stack copies its item data, UUID included. Recording
+     * the operation lets the detector tell the pieces of a split stack from a
+     * genuine duplication. Only meaningful when stackable tracking is on.
+     */
+    private void recordStackDivision(final InventoryClickEvent event) {
+        final ItemStack clicked = event.getCurrentItem();
+        final ItemStack cursor = event.getCursor();
 
         switch (event.getAction()) {
             case PICKUP_HALF:
             case PICKUP_SOME:
             case PICKUP_ONE:
-                this.handleStackDivision(currentItem, playerName);
+                this.registerDivision(clicked, clicked == null ? 0 : clicked.getAmount());
                 break;
             case PLACE_SOME:
             case PLACE_ONE:
-                this.handleStackPlacement(event.getCursor(), currentItem, playerName);
+            case PLACE_ALL:
+                if (cursor != null && clicked != null) {
+                    final String cursorUuid = this.itemManager.extractUUID(cursor);
+                    if (cursorUuid != null && cursorUuid.equals(this.itemManager.extractUUID(clicked))) {
+                        this.itemManager.registerLegitimateStackDivision(cursorUuid,
+                                cursor.getAmount() + clicked.getAmount());
+                    }
+                }
                 break;
             default:
                 break;
         }
     }
 
-    private void handleStackDivision(final ItemStack originalStack, final String playerName) {
-        final String uuid = this.itemManager.extractUUID(originalStack);
-        if (uuid == null) {
-            return;
-        }
-        final int originalAmount = originalStack.getAmount();
-
-        this.itemManager.registerLegitimateStackDivision(uuid, originalAmount);
-
-        this.plugin.getLogger().fine(String.format(
-                "Division detected: %s divise %s x%d (UUID: %s)",
-                playerName, originalStack.getType(), originalAmount, uuid));
-    }
-
-    private void handleStackPlacement(final ItemStack cursor, final ItemStack target, final String playerName) {
-        if (cursor == null) {
-            return;
-        }
-        final String cursorUuid = this.itemManager.extractUUID(cursor);
-        if (cursorUuid == null) {
-            return;
-        }
-        if (target != null) {
-            final String targetUuid = this.itemManager.extractUUID(target);
-            if (cursorUuid.equals(targetUuid)) {
-                final int totalAmount = cursor.getAmount() + target.getAmount();
-                this.itemManager.registerLegitimateStackDivision(cursorUuid, totalAmount);
-
-                this.plugin.getLogger().fine(String.format(
-                        "Recombination detected: %s combine %s (total: %d, UUID: %s)",
-                        playerName, cursor.getType(), totalAmount, cursorUuid));
-            }
+    private void registerDivision(final ItemStack stack, final int totalAmount) {
+        final String uuid = this.itemManager.extractUUID(stack);
+        if (uuid != null) {
+            this.itemManager.registerLegitimateStackDivision(uuid, totalAmount);
         }
     }
 
-    @EventHandler(priority = EventPriority.MONITOR)
-    public void onInventoryDrag(final InventoryDragEvent event) {
-        if (event.isCancelled()) {
+    /**
+     * Queues a next-tick stamping pass for this player, at most one at a time.
+     */
+    private void scheduleStampPass(final Player player) {
+        final UUID playerId = player.getUniqueId();
+        if (!this.pendingStampPasses.add(playerId)) {
             return;
         }
         try {
-            final ItemStack oldCursor = event.getOldCursor();
-            if (oldCursor != null) {
-                this.itemManager.assignUUIDIfNeeded(oldCursor);
+            this.plugin.getServer().getScheduler().runTask(this.plugin, () -> {
+                this.pendingStampPasses.remove(playerId);
+                this.stampInventory(player);
+            });
+        } catch (final RuntimeException e) {
+            // The plugin is unloading; the next full scan will stamp these items.
+            this.pendingStampPasses.remove(playerId);
+        }
+    }
+
+    /**
+     * Stamps every trackable item the player holds. Runs on the main thread.
+     */
+    private void stampInventory(final Player player) {
+        if (!player.isOnline() || this.itemManager.isExempt(player)) {
+            return;
+        }
+        try {
+            final PlayerInventory inventory = player.getInventory();
+            final int size = inventory.getSize();
+            for (int slot = 0; slot < size; slot++) {
+                final ItemStack stack = inventory.getItem(slot);
+                if (stack != null && stack.getType() != Material.AIR
+                        && this.itemManager.assignUUIDIfNeeded(stack)) {
+                    inventory.setItem(slot, stack);
+                }
             }
-        } catch (final Exception e) {
-            this.plugin.getLogger().log(Level.WARNING, "Error during inventory drag", e);
+
+            final ItemStack cursor = player.getItemOnCursor();
+            if (this.itemManager.assignUUIDIfNeeded(cursor)) {
+                player.setItemOnCursor(cursor);
+            }
+        } catch (final RuntimeException e) {
+            this.plugin.getLogger().log(Level.WARNING, "Error stamping the inventory of " + player.getName(), e);
         }
     }
 
+    private void logCreativeAction(final String type, final Player player, final ItemStack stack) {
+        if (stack == null || stack.getType() == Material.AIR) {
+            return;
+        }
+        this.plugin.getJsonLogger().logEvent(type, String.format("Player: %s, Item: %s x%d",
+                player.getName(), stack.getType(), stack.getAmount()));
 
-    private void checkSuspiciousPickup(final PlayerPickupItemEvent event) {
-        final String playerName = event.getPlayer().getName();
-        final ItemStack item = event.getItem().getItemStack();
-        this.plugin.getJsonLogger().logEvent("suspicious_pickup",
-                "Player: " + playerName + ", Item: " + item.getType() + " x" + item.getAmount());
-    }
-
-    private void logCreativeActivity(final PlayerDropItemEvent event) {
-        final String playerName = event.getPlayer().getName();
-        final ItemStack item = event.getItemDrop().getItemStack();
-        this.plugin.getJsonLogger().logEvent("creative_drop",
-                "Player: " + playerName + ", Item: " + item.getType() + " x" + item.getAmount());
         if (this.config.shouldMonitorAdminCommands()) {
-            this.plugin.getServer().getOnlinePlayers().stream()
-                    .filter(p -> p.hasPermission("antiduplication.admin"))
-                    .forEach(admin -> admin.sendMessage(
-                            "§e[AntiDupe] " + playerName + " dropped " +
-                                    item.getAmount() + "x " + item.getType() + " in creative mode"));
+            this.plugin.notifyAdmins(String.format("§e[AntiDupe] %s handled %dx %s in creative mode",
+                    player.getName(), stack.getAmount(), stack.getType()));
         }
     }
 
-    private void checkSuspiciousInventoryAction(final InventoryClickEvent event) {
-        if (event.getAction() == InventoryAction.CLONE_STACK) {
-            // Stack clone (middle-click in creative)
-            this.plugin.getJsonLogger().logEvent("stack_clone",
-                    "Player: " + event.getWhoClicked().getName() +
-                            ", Item: " + (event.getCurrentItem() != null ? event.getCurrentItem().getType() : "null"));
-        }
-        // Other checks can be added here
-    }
-
-    private static class StackInfo {
-        private final String uuid;
-        private final int amount;
-        private final long timestamp;
-
-        public StackInfo(final String uuid, final int amount) {
-            this.uuid = uuid;
-            this.amount = amount;
-            this.timestamp = System.currentTimeMillis();
-        }
-
-        public String getUuid() {
-            return this.uuid;
-        }
-
-        public int getAmount() {
-            return this.amount;
-        }
-
-        public long getTimestamp() {
-            return this.timestamp;
-        }
+    private void logSuspiciousAction(final String type, final String playerName, final ItemStack stack) {
+        this.plugin.getJsonLogger().logEvent(type, String.format("Player: %s, Item: %s",
+                playerName, stack == null ? "none" : stack.getType() + " x" + stack.getAmount()));
     }
 }

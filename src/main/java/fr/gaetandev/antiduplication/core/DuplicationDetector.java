@@ -20,302 +20,208 @@ import fr.gaetandev.antiduplication.AntiDuplicationPlugin;
 import fr.gaetandev.antiduplication.config.ConfigManager;
 import fr.gaetandev.antiduplication.model.DuplicationEvent;
 import fr.gaetandev.antiduplication.model.TrackedItem;
-import fr.gaetandev.antiduplication.threading.ThreadManager;
-import org.bukkit.Bukkit;
-import org.bukkit.World;
+import fr.gaetandev.antiduplication.storage.RedisRegistry;
 import org.bukkit.entity.Player;
-import org.bukkit.inventory.Inventory;
-import org.bukkit.inventory.ItemStack;
 
 import java.time.Instant;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 
+/**
+ * Turns a scan snapshot into duplication events.
+ *
+ * <p>The snapshot is collected on the main thread by {@link InventoryScanner};
+ * everything here is pure computation over immutable values and therefore runs
+ * on a worker thread. Applying the result goes back to the main thread.
+ */
 public final class DuplicationDetector {
 
     private final AntiDuplicationPlugin plugin;
-    private final ConfigManager config;
     private final ItemManager itemManager;
-    private ThreadManager threadManager;
+    private final InventoryScanner scanner;
+    private final RedisRegistry redisRegistry;
 
-    // Avoid rescanning the same UUIDs too frequently; helps limit load in rapid-scan scenarios
-    private final Map<String, Long> lastScanCache = new ConcurrentHashMap<>();
+    /**
+     * The snapshot future is completed on the main thread, so the analysis stage
+     * must be handed to this executor explicitly; a plain thenApply would run the
+     * whole analysis, Redis round trips included, on the server thread.
+     */
+    private final Executor analysisExecutor;
 
-    // Tracks all known UUIDs seen during the current or previous scans
-    private final Map<String, Set<String>> knownUuids = new ConcurrentHashMap<>();
+    /** Guards against overlapping sweeps, whether scheduled or manual. */
+    private final AtomicBoolean scanInProgress = new AtomicBoolean();
 
-    private volatile long lastScanDuration = 0;
-    private volatile int lastScanItemCount = 0;
-    private volatile int lastScanDuplicationCount = 0;
+    private volatile long lastScanDuration;
+    private volatile int lastScanItemCount;
+    private volatile int lastScanDuplicationCount;
 
-    public DuplicationDetector(final AntiDuplicationPlugin plugin, final ConfigManager config, final ItemManager itemManager) {
+    public DuplicationDetector(final AntiDuplicationPlugin plugin, final ConfigManager config,
+                               final ItemManager itemManager, final RedisRegistry redisRegistry,
+                               final Executor analysisExecutor) {
         this.plugin = plugin;
-        this.config = config;
         this.itemManager = itemManager;
+        this.redisRegistry = redisRegistry;
+        this.analysisExecutor = analysisExecutor;
+        this.scanner = new InventoryScanner(plugin, config, itemManager, itemManager.getStackManager());
     }
 
-    public void initialize() {
-        this.threadManager = this.plugin.getThreadManager();
-        if (this.threadManager == null) {
-            throw new IllegalStateException("ThreadManager is not available");
+    /**
+     * Sweeps the server and analyses the result.
+     *
+     * @param includeContainers whether to walk the loaded chunks too, or only the
+     *                          online players
+     * @return the events to apply; an empty list when a sweep is already running
+     */
+    public CompletableFuture<List<DuplicationEvent>> performFullScan(final boolean includeContainers) {
+        if (!this.scanInProgress.compareAndSet(false, true)) {
+            this.plugin.debug("A scan is already running, this one is skipped");
+            return CompletableFuture.completedFuture(Collections.<DuplicationEvent>emptyList());
         }
-        this.plugin.getLogger().info("DuplicationDetector initialized");
+
+        final String method = includeContainers ? "full_scan" : "player_sweep";
+        return this.scanner.scanServer(includeContainers)
+                .thenApplyAsync(snapshot -> this.analyse(snapshot, method), this.analysisExecutor)
+                .handle((events, throwable) -> {
+                    this.scanInProgress.set(false);
+                    if (throwable != null) {
+                        this.plugin.getLogger().log(Level.SEVERE, "Error during duplication scan", throwable);
+                        return Collections.<DuplicationEvent>emptyList();
+                    }
+                    return events;
+                });
     }
 
-    // Async full scan triggered manually or on timer
-    public CompletableFuture<List<DuplicationEvent>> performFullScan() {
-        return this.threadManager.submitTask(() -> {
-            final long startTime = System.currentTimeMillis();
-            try {
-                this.plugin.getLogger().fine("Starting duplication scan...");
-                this.lastScanItemCount = 0;
-                this.lastScanDuplicationCount = 0;
-                final Map<String, List<TrackedItem>> itemsByUuid = this.collectAllItems();
-                final List<DuplicationEvent> duplications = this.findDuplications(itemsByUuid);
-                this.lastScanDuration = System.currentTimeMillis() - startTime;
-                this.lastScanDuplicationCount = duplications.size();
-                this.plugin.getLogger().fine(String.format(
-                        "Scan completed: %d items analyzed, %d duplications detected in %dms",
-                        this.lastScanItemCount, this.lastScanDuplicationCount, this.lastScanDuration));
-                return duplications;
-            } catch (final Exception e) {
-                this.plugin.getLogger().log(Level.SEVERE, "Error during duplication scan", e);
-                return Collections.emptyList();
-            }
-        });
+    /**
+     * Sweeps a single player. Does not take the global scan lock, since it is
+     * cheap and triggered by an operator.
+     */
+    public CompletableFuture<List<DuplicationEvent>> scanPlayer(final Player player) {
+        return this.scanner.scanPlayer(player)
+                .thenApplyAsync(snapshot -> this.analyse(snapshot, "player_scan"), this.analysisExecutor)
+                .exceptionally(throwable -> {
+                    this.plugin.getLogger().log(Level.SEVERE, "Error scanning " + player.getName(), throwable);
+                    return Collections.emptyList();
+                });
     }
 
-    private Map<String, List<TrackedItem>> collectAllItems() {
-        final Map<String, List<TrackedItem>> itemsByUuid = new ConcurrentHashMap<>();
-        final long timeoutTime = System.currentTimeMillis() + this.config.getScanTimeout();
+    /**
+     * Groups the snapshot by UUID and decides, for each UUID seen more than
+     * once, whether it is a duplication and which copy to keep.
+     */
+    private List<DuplicationEvent> analyse(final ScanSnapshot snapshot, final String method) {
+        final long startedAt = System.currentTimeMillis();
+        final List<DuplicationEvent> events = new ArrayList<>();
+        final Set<String> foreignDuplicates = this.collectForeignDuplicates(snapshot);
 
-        // Avoid scanning if the time limit is exceeded during player inventory scanning
-        this.scanPlayerInventories(itemsByUuid, timeoutTime);
+        for (final Map.Entry<String, List<TrackedItem>> entry : snapshot.getItemsByUuid().entrySet()) {
+            final String uuid = entry.getKey();
+            final List<TrackedItem> copies = entry.getValue();
 
-        // Container scanning is skipped or simplified by default for performance
-        if (System.currentTimeMillis() < timeoutTime) {
-            this.scanLoadedContainers(itemsByUuid, timeoutTime);
-        }
-        return itemsByUuid;
-    }
-
-    private void scanPlayerInventories(final Map<String, List<TrackedItem>> itemsByUuid, final long timeoutTime) {
-        final Collection<? extends Player> onlinePlayers = Bukkit.getOnlinePlayers();
-        for (final Player player : onlinePlayers) {
-            if (System.currentTimeMillis() > timeoutTime) {
-                this.plugin.getLogger().warning("Timeout reached during player scanning");
-                break;
-            }
-            try {
-                this.scanPlayerInventory(player, itemsByUuid);
-            } catch (final Exception e) {
-                this.plugin.getLogger().log(Level.WARNING,
-                        "Error scanning inventory of " + player.getName(), e);
-            }
-        }
-    }
-
-    private void scanPlayerInventory(final Player player, final Map<String, List<TrackedItem>> itemsByUuid) {
-        final Inventory inventory = player.getInventory();
-
-        for (int slot = 0; slot < inventory.getSize(); slot++) {
-            final ItemStack item = inventory.getItem(slot);
-            if (item == null) {
+            if (copies.size() > 1) {
+                if (this.itemManager.getDivisionTracker().isLegitimate(uuid, copies)) {
+                    this.plugin.debug(String.format(
+                            "Legitimate stack division ignored: UUID %s split in %d", uuid, copies.size()));
+                    continue;
+                }
+                events.add(this.buildEvent(uuid, copies, method, snapshot.getDurationMs()));
+                this.itemManager.countDetectedDuplication();
                 continue;
             }
 
-            TrackedItem trackedItem = this.itemManager.getStackManager()
-                    .createTrackedItem(item, "PLAYER_INVENTORY", player.getName());
-
-            if (trackedItem != null) {
-                itemsByUuid.computeIfAbsent(trackedItem.getUuid(), k -> new ArrayList<>())
-                        .add(trackedItem);
-                this.lastScanItemCount++;
-            } else {
-                if (this.itemManager.assignUUIDIfNeeded(item)) {
-                    trackedItem = this.itemManager.getStackManager()
-                            .createTrackedItem(item, "PLAYER_INVENTORY", player.getName());
-
-                    if (trackedItem != null) {
-                        itemsByUuid.computeIfAbsent(trackedItem.getUuid(), k -> new ArrayList<>())
-                                .add(trackedItem);
-                        this.lastScanItemCount++;
-                    }
-                }
+            // A single local copy is normal, unless another server of the network
+            // reports holding the same UUID. Nothing can be removed in that case:
+            // the other copy is out of reach, so it is reported for an operator.
+            if (foreignDuplicates.contains(uuid)) {
+                this.reportForeignDuplicate(uuid, copies.get(0));
             }
+            this.itemManager.rememberOwner(uuid, copies.get(0).getItemLocation().getOwnerKey());
+        }
+
+        this.lastScanDuration = snapshot.getDurationMs();
+        this.lastScanItemCount = snapshot.getItemsScanned();
+        this.lastScanDuplicationCount = events.size();
+
+        this.plugin.debug(String.format(
+                "Scan analysed in %dms: %d items, %d UUIDs assigned, %d duplications, "
+                        + "%d oversized stacks, %d untagged rejected%s",
+                System.currentTimeMillis() - startedAt, snapshot.getItemsScanned(), snapshot.getUuidsAssigned(),
+                events.size(), snapshot.getOversizedStacks(), snapshot.getUntaggedRejected(),
+                snapshot.isTruncated() ? " (partial scan)" : ""));
+        return events;
+    }
+
+    private void reportForeignDuplicate(final String uuid, final TrackedItem localCopy) {
+        this.plugin.getLogger().warning(String.format(
+                "UUID %s is also held by another server of the network: %s at %s",
+                uuid, localCopy.getItemDescription(), localCopy.getLocationDescription()));
+        this.plugin.getJsonLogger().logEvent("cross_server_duplication", String.format(
+                "UUID: %s, Item: %s, Location: %s, Server: %s",
+                uuid, localCopy.getItemDescription(), localCopy.getLocationDescription(),
+                this.redisRegistry.getServerId()));
+        this.plugin.notifyAdmins(String.format(
+                "§c[AntiDupe] %s also exists on another server (%s)",
+                localCopy.getItemDescription(), uuid));
+    }
+
+    /**
+     * Publishes the observed UUIDs to Redis, if enabled, and reports those that
+     * another server of the network also holds.
+     */
+    private Set<String> collectForeignDuplicates(final ScanSnapshot snapshot) {
+        if (this.redisRegistry == null || !this.redisRegistry.isAvailable()) {
+            return Collections.emptySet();
+        }
+        try {
+            return this.redisRegistry.claim(snapshot.getItemsByUuid().keySet());
+        } catch (final RuntimeException e) {
+            this.plugin.getLogger().log(Level.WARNING, "Unable to reach the shared registry", e);
+            return Collections.emptySet();
         }
     }
 
-    private void scanLoadedContainers(final Map<String, List<TrackedItem>> itemsByUuid, final long timeoutTime) {
-        for (final World world : Bukkit.getWorlds()) {
-            if (System.currentTimeMillis() > timeoutTime) {
-                this.plugin.getLogger().warning("Timeout reached during container scanning");
-                break;
-            }
-            try {
-                // Currently disabled or stubbed for performance reasons
-                this.scanWorldContainers(world, itemsByUuid, timeoutTime);
-            } catch (final Exception e) {
-                this.plugin.getLogger().log(Level.WARNING,
-                        "Error scanning containers in " + world.getName(), e);
-            }
-        }
-    }
+    private DuplicationEvent buildEvent(final String uuid, final List<TrackedItem> copies,
+                                        final String method, final long scanDurationMs) {
+        final TrackedItem retained = RetentionPolicy.chooseRetained(this.itemManager.knownOwner(uuid), copies);
+        final Instant firstSeen = this.itemManager.firstSeen(uuid);
 
-    private void scanWorldContainers(final World world, final Map<String, List<TrackedItem>> itemsByUuid, final long timeoutTime) {
-        // Note: This method is simplified to avoid overloading the server
-        // In a complete implementation, we would scan all loaded chunks
-        // and their tile entities (chests, furnaces, etc.)
-        // For now, we are limiting it to players to avoid performance issues
-        this.plugin.getLogger().finest("Container scanning temporarily disabled for performance");
-    }
-
-    private List<DuplicationEvent> findDuplications(final Map<String, List<TrackedItem>> itemsByUuid) {
-        final List<DuplicationEvent> duplications = new ArrayList<>();
-        for (final Map.Entry<String, List<TrackedItem>> entry : itemsByUuid.entrySet()) {
-            final String uuid = entry.getKey();
-            final List<TrackedItem> items = entry.getValue();
-            // Only consider duplicates where the same UUID is found in multiple instances
-            if (items.size() > 1) {
-                final DuplicationEvent event = this.createDuplicationEvent(uuid, items);
-                duplications.add(event);
-
-                if (!this.isLegitimateStackDivision(uuid, items)) {
-                    this.plugin.getLogger().warning(String.format(
-                            "Duplication found - UUID: %s, Copies: %d", uuid, items.size()));
-
-                    for (final TrackedItem item : items) {
-                        this.plugin.getLogger().warning("  -> " + item.getLocationDescription());
-                    }
-                } else {
-                    this.plugin.getLogger().fine(String.format(
-                            "Legitimate division ignored - UUID: %s, Parties: %d", uuid, items.size()));
-                    duplications.remove(duplications.size() - 1);
-                }
-            }
-        }
-
-        return duplications;
-    }
-
-    private boolean isLegitimateStackDivision(final String uuid, final List<TrackedItem> items) {
-        if (items.size() <= this.config.getMaxDivisionPerStack()) {
-            final TrackedItem first = items.get(0);
-            final boolean sameType = items.stream()
-                    .allMatch(item -> item.getMaterial() == first.getMaterial());
-
-            if (sameType) {
-                final int totalAmount = items.stream()
-                        .mapToInt(TrackedItem::getAmount)
-                        .sum();
-
-                final int maxStackSize = first.getMaterial().getMaxStackSize();
-                if (totalAmount <= maxStackSize) {
-                    this.plugin.getLogger().fine(String.format(
-                            "Probable division detected: %s x%d into %d parts",
-                            first.getMaterial(), totalAmount, items.size()));
-                    return true;
-                }
-            }
-        }
-
-        return false;
-    }
-
-    private DuplicationEvent createDuplicationEvent(final String uuid, final List<TrackedItem> duplicatedItems) {
-        final DuplicationEvent.Severity severity = this.calculateSeverity(duplicatedItems);
-        // Analyze locations for additional information
-        final String additionalInfo = this.analyzeLocations(duplicatedItems);
         return new DuplicationEvent.Builder()
                 .duplicatedUuid(uuid)
-                .duplicatedItems(duplicatedItems)
+                .duplicatedItems(firstSeen == null ? copies : withFirstSeen(copies, firstSeen))
+                .retainedItem(firstSeen == null ? retained : retained.withFirstSeen(firstSeen))
                 .detectionTime(Instant.now())
-                .detectionMethod("comprehensive_scan")
-                .severity(severity)
-                .scanDurationMs(this.lastScanDuration)
-                .additionalInfo(additionalInfo)
+                .detectionMethod(method)
+                .severity(RetentionPolicy.severityOf(copies.size(), this.holdsValuableItem(copies)))
+                .scanDurationMs(scanDurationMs)
+                .additionalInfo(RetentionPolicy.describeSpread(copies))
                 .build();
     }
 
-    private DuplicationEvent.Severity calculateSeverity(final List<TrackedItem> items) {
-        final int count = items.size();
-        final boolean hasValuableItems = items.stream()
-                .anyMatch(item -> this.isValuableItem(item.getMaterial()));
-        // Adjust severity based on item value and duplication count
-        if (count >= 10 || (count >= 5 && hasValuableItems)) {
-            return DuplicationEvent.Severity.CRITICAL;
-        } else if (count >= 5 || (count >= 3 && hasValuableItems)) {
-            return DuplicationEvent.Severity.HIGH;
-        } else if (count >= 3) {
-            return DuplicationEvent.Severity.MEDIUM;
-        } else {
-            return DuplicationEvent.Severity.LOW;
+    private static List<TrackedItem> withFirstSeen(final List<TrackedItem> copies, final Instant firstSeen) {
+        final List<TrackedItem> dated = new ArrayList<>(copies.size());
+        for (final TrackedItem copy : copies) {
+            dated.add(copy.withFirstSeen(firstSeen));
         }
+        return dated;
     }
 
-    private boolean isValuableItem(final org.bukkit.Material material) {
-        // Basic logic to detect high-value or enchanted gear
-        switch (material) {
-            case DIAMOND:
-            case DIAMOND_BLOCK:
-            case EMERALD:
-            case EMERALD_BLOCK:
-            case GOLD_INGOT:
-            case GOLD_BLOCK:
-            case IRON_INGOT:
-            case IRON_BLOCK:
+    private boolean holdsValuableItem(final List<TrackedItem> copies) {
+        for (final TrackedItem copy : copies) {
+            if (this.itemManager.getStackManager().isValuable(copy.getMaterial())) {
                 return true;
-            default:
-                return material.name().contains("_SWORD") ||
-                        material.name().contains("_PICKAXE") ||
-                        material.name().contains("_AXE") ||
-                        material.name().contains("_HOE") ||
-                        material.name().contains("_HELMET") ||
-                        material.name().contains("_CHESTPLATE") ||
-                        material.name().contains("_LEGGINGS") ||
-                        material.name().contains("_BOOTS");
-        }
-    }
-
-    private String analyzeLocations(final List<TrackedItem> items) {
-        final Set<String> players = new HashSet<>();
-        final Set<String> containers = new HashSet<>();
-        for (final TrackedItem item : items) {
-            if (item.getPlayerName() != null) {
-                players.add(item.getPlayerName());
             }
-            containers.add(item.getContainer());
         }
-        final StringBuilder info = new StringBuilder();
-        // Useful metadata to inform admins about how widespread the duplication is
-        if (players.size() == 1) {
-            info.append("All items with a single player (").append(players.iterator().next()).append("). ");
-        } else if (players.size() > 1) {
-            info.append("Items spread across ").append(players.size()).append(" players. ");
-        }
-        if (containers.size() == 1) {
-            info.append("Same container type: ").append(containers.iterator().next()).append(".");
-        }
-        return info.toString();
+        return false;
     }
 
-    public CompletableFuture<List<DuplicationEvent>> scanPlayer(final Player player) {
-        return this.threadManager.submitTask(() -> {
-            final Map<String, List<TrackedItem>> itemsByUuid = new ConcurrentHashMap<>();
-            this.scanPlayerInventory(player, itemsByUuid);
-            return this.findDuplications(itemsByUuid);
-        });
-    }
-
-    public boolean isRecentScanAvailable() {
-        // Used to avoid triggering too frequent scans which may be expensive
-        return (System.currentTimeMillis() - this.lastScanDuration) < this.config.getScanIntervalMillis() / 2;
-    }
-
-    public long getLastScanDuration() {
-        return this.lastScanDuration;
+    public boolean isScanInProgress() {
+        return this.scanInProgress.get();
     }
 
     public int getLastScanItemCount() {
@@ -327,9 +233,7 @@ public final class DuplicationDetector {
     }
 
     public String getPerformanceReport() {
-        return String.format(
-                "Detector Performance - Last scan: %dms, Items: %d, Duplications: %d",
-                this.lastScanDuration, this.lastScanItemCount, this.lastScanDuplicationCount
-        );
+        return String.format("Last scan: %dms, %d items, %d duplications",
+                this.lastScanDuration, this.lastScanItemCount, this.lastScanDuplicationCount);
     }
 }

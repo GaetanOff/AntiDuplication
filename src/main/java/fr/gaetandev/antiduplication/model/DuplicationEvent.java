@@ -22,13 +22,20 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
+/**
+ * One UUID found in several places at once, together with the copy the plugin
+ * decided to keep.
+ */
 public final class DuplicationEvent {
 
+    /**
+     * What the plugin ended up doing about a duplication. Decided after the
+     * removal pass, not when the event is created, so the audit trail cannot
+     * claim a removal that did not happen.
+     */
     public enum Action {
-        ITEMS_REMOVED("Items removed"),
-        WARNING_LOGGED("Warning logged"),
-        PLAYERS_NOTIFIED("Players notified"),
-        ADMIN_ALERTED("Administrators alerted");
+        ITEMS_REMOVED("Duplicated copies removed"),
+        WARNING_LOGGED("Warning logged, no copy could be removed");
 
         private final String description;
 
@@ -60,8 +67,8 @@ public final class DuplicationEvent {
 
     private final String duplicatedUuid;
     private final List<TrackedItem> duplicatedItems;
+    private final TrackedItem retainedItem;
     private final Instant detectionTime;
-    private final Action actionTaken;
     private final Severity severity;
     private final String detectionMethod;
     private final long scanDurationMs;
@@ -70,8 +77,8 @@ public final class DuplicationEvent {
     private DuplicationEvent(final Builder builder) {
         this.duplicatedUuid = builder.duplicatedUuid;
         this.duplicatedItems = Collections.unmodifiableList(new ArrayList<>(builder.duplicatedItems));
+        this.retainedItem = builder.retainedItem;
         this.detectionTime = builder.detectionTime;
-        this.actionTaken = builder.actionTaken;
         this.severity = builder.severity;
         this.detectionMethod = builder.detectionMethod;
         this.scanDurationMs = builder.scanDurationMs;
@@ -82,16 +89,35 @@ public final class DuplicationEvent {
         return this.duplicatedUuid;
     }
 
+    /**
+     * @return every observed copy, the retained one included
+     */
     public List<TrackedItem> getDuplicatedItems() {
         return this.duplicatedItems;
     }
 
-    public Instant getDetectionTime() {
-        return this.detectionTime;
+    /**
+     * @return the copy considered legitimate, which must never be deleted
+     */
+    public TrackedItem getRetainedItem() {
+        return this.retainedItem;
     }
 
-    public Action getActionTaken() {
-        return this.actionTaken;
+    /**
+     * @return the copies to delete, that is every copy but the retained one
+     */
+    public List<TrackedItem> getItemsToRemove() {
+        final List<TrackedItem> toRemove = new ArrayList<>(this.duplicatedItems.size() - 1);
+        for (final TrackedItem item : this.duplicatedItems) {
+            if (!item.equals(this.retainedItem)) {
+                toRemove.add(item);
+            }
+        }
+        return toRemove;
+    }
+
+    public Instant getDetectionTime() {
+        return this.detectionTime;
     }
 
     public Severity getSeverity() {
@@ -114,9 +140,29 @@ public final class DuplicationEvent {
         return this.duplicatedItems.size();
     }
 
+    /**
+     * Same finding restricted to the copies that were confirmed to exist.
+     *
+     * <p>Used after the pre-removal re-check, so the audit trail describes the
+     * copies actually acted upon rather than everything the sweep reported.
+     */
+    public DuplicationEvent narrowedTo(final List<TrackedItem> confirmedCopies, final TrackedItem retained) {
+        return new Builder()
+                .duplicatedUuid(this.duplicatedUuid)
+                .duplicatedItems(confirmedCopies)
+                .retainedItem(retained)
+                .detectionTime(this.detectionTime)
+                .severity(this.severity)
+                .detectionMethod(this.detectionMethod)
+                .scanDurationMs(this.scanDurationMs)
+                .additionalInfo(this.additionalInfo)
+                .build();
+    }
+
     public String getSummary() {
-        return String.format("Duplication detected: UUID %s (%d copies) - %s",
-                this.duplicatedUuid, this.getDuplicateCount(), this.actionTaken.getDescription());
+        return String.format("Duplication detected: UUID %s, %d copies, severity %s, %s",
+                this.duplicatedUuid, this.getDuplicateCount(), this.severity.getDescription(),
+                this.retainedItem.getItemDescription());
     }
 
     public String getDetailedDescription() {
@@ -126,11 +172,11 @@ public final class DuplicationEvent {
         desc.append("  Copies: ").append(this.getDuplicateCount()).append("\n");
         desc.append("  Severity: ").append(this.severity.getDescription()).append("\n");
         desc.append("  Method: ").append(this.detectionMethod).append("\n");
-        desc.append("  Action: ").append(this.actionTaken.getDescription()).append("\n");
         desc.append("  Locations:\n");
         for (int i = 0; i < this.duplicatedItems.size(); i++) {
             final TrackedItem item = this.duplicatedItems.get(i);
             desc.append("    ").append(i + 1).append(". ")
+                    .append(item.equals(this.retainedItem) ? "[kept] " : "[removed] ")
                     .append(item.getLocationDescription()).append(" - ")
                     .append(item.getItemDescription()).append("\n");
         }
@@ -149,8 +195,8 @@ public final class DuplicationEvent {
             return false;
         }
         final DuplicationEvent that = (DuplicationEvent) obj;
-        return Objects.equals(this.duplicatedUuid, that.duplicatedUuid) &&
-                Objects.equals(this.detectionTime, that.detectionTime);
+        return Objects.equals(this.duplicatedUuid, that.duplicatedUuid)
+                && Objects.equals(this.detectionTime, that.detectionTime);
     }
 
     @Override
@@ -166,9 +212,9 @@ public final class DuplicationEvent {
     public static final class Builder {
         private String duplicatedUuid;
         private List<TrackedItem> duplicatedItems;
+        private TrackedItem retainedItem;
         private Instant detectionTime = Instant.now();
-        private Action actionTaken = Action.ITEMS_REMOVED;
-        private Severity severity = Severity.MEDIUM;
+        private Severity severity;
         private String detectionMethod = "automatic_scan";
         private long scanDurationMs = 0;
         private String additionalInfo;
@@ -183,13 +229,13 @@ public final class DuplicationEvent {
             return this;
         }
 
-        public Builder detectionTime(final Instant time) {
-            this.detectionTime = time;
+        public Builder retainedItem(final TrackedItem retainedItem) {
+            this.retainedItem = retainedItem;
             return this;
         }
 
-        public Builder actionTaken(final Action action) {
-            this.actionTaken = action;
+        public Builder detectionTime(final Instant time) {
+            this.detectionTime = time;
             return this;
         }
 
@@ -219,19 +265,25 @@ public final class DuplicationEvent {
             if (this.duplicatedItems.size() < 2) {
                 throw new IllegalArgumentException("At least 2 duplicated items required");
             }
-            if (this.severity == Severity.MEDIUM) {
-                final int count = this.duplicatedItems.size();
-                if (count >= 10) {
-                    this.severity = Severity.CRITICAL;
-                } else if (count >= 5) {
-                    this.severity = Severity.HIGH;
-                } else if (count >= 3) {
-                    this.severity = Severity.MEDIUM;
-                } else {
-                    this.severity = Severity.LOW;
-                }
+            if (this.retainedItem == null) {
+                this.retainedItem = this.duplicatedItems.get(0);
+            } else if (!this.duplicatedItems.contains(this.retainedItem)) {
+                throw new IllegalArgumentException("The retained item must be one of the duplicated items");
+            }
+            if (this.severity == null) {
+                this.severity = severityFor(this.duplicatedItems.size());
             }
             return new DuplicationEvent(this);
+        }
+
+        private static Severity severityFor(final int copies) {
+            if (copies >= 10) {
+                return Severity.CRITICAL;
+            }
+            if (copies >= 5) {
+                return Severity.HIGH;
+            }
+            return copies >= 3 ? Severity.MEDIUM : Severity.LOW;
         }
     }
 }

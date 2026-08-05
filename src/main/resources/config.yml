@@ -3,36 +3,52 @@
 
 # Scan settings
 scanning:
-  # Interval between each scan (in seconds)
+  # Interval between each scan of the online players (in seconds). Cheap, and
+  # this is where items actually change hands.
   interval: 5
-  # Number of chunks processed per batch
+  # Interval between each sweep of the loaded chunks: block containers, entity
+  # inventories, equipment, item frames and dropped items (in seconds).
+  #
+  # Kept separate on purpose. Chunks are the expensive half of a sweep and the
+  # slow moving one: on a server with thousands of loaded chunks, walking them
+  # every player cycle would leave the plugin permanently sweeping. 0 disables
+  # chunk scanning entirely (players only).
+  container-interval: 60
+  # Scan units processed per server tick. A unit is one player or one chunk
+  # (with everything that chunk holds). Lower it if a scan is noticeable on a
+  # very large world, raise it to finish sweeps faster.
   batch-size: 100
-  # Maximum timeout for a scan (in milliseconds)
+  # Maximum duration of one scan (in milliseconds). A scan that runs out of time
+  # stops where it is and reports a partial result; the next one starts over.
   timeout: 30000
 
 # UUID configuration
 uuid:
-  # Length of the generated UUID (8–36 characters)
+  # Length of the generated UUID (8-32 characters)
   length: 12
-  # Prefix to identify plugin UUIDs
+  # Prefix to identify plugin UUIDs (max 8 characters)
   prefix: "AD_"
-  # NBT tag used to store the UUID
+  # Name of the item data key holding the UUID. On 1.14+ it is stored in the
+  # persistent data container, on older versions directly in the item NBT.
   nbt-tag: "AntiDupeUUID"
 
 # Logging
 logging:
   # Enable JSON logging
   enabled: true
-  # Directory for log storage
+  # Directory for log storage, relative to the plugin folder
   directory: "logs"
   # Filename format (with date)
   filename-format: "yyyy-MM-dd"
-  # Log level (DEBUG, INFO, WARN, ERROR)
+  # Log level (DEBUG, INFO, WARN, ERROR). DEBUG adds verbose scan tracing to the
+  # console; WARN and ERROR reduce what the plugin prints.
   level: "INFO"
-  # Automatic log rotation (in days)
+  # Automatic log rotation (in days), 0 to keep everything
   rotation-days: 30
 
-# Redis (optional)
+# Redis (optional): shares item UUIDs between the servers of a network so that
+# the same item existing on two servers at once is detected. Leave it off for a
+# single server, it brings nothing there.
 redis:
   # Enable Redis support
   enabled: false
@@ -41,28 +57,62 @@ redis:
   port: 6379
   password: ""
   database: 0
+  # Connection and command timeout (in milliseconds)
+  timeout: 2000
   # Redis key prefix
   key-prefix: "antiduplication:"
+  # How long a claim on a UUID survives (in seconds). Kept to at least four scan
+  # intervals so a server never loses its own claims between two scans.
+  ttl: 300
+  # Identity of this server in the shared registry. Empty means derive it from
+  # the server address and port.
+  server-id: ""
 
 # Security
 security:
-  # Additional checks against exploits
+  # Additional checks against exploits: oversized stacks are trimmed back to the
+  # legal size, and suspicious inventory actions are logged.
   strict-mode: true
-  # Block items without UUID in strict mode
+  # DESTRUCTIVE, off by default. With strict mode on, delete trackable items
+  # that carry no UUID instead of stamping one. Only useful on a server where
+  # every item is known to have been stamped already.
   block-no-uuid: false
   # Monitor critical zones
   monitor-creative: true
   monitor-admin-commands: true
-  # Tolerance for stack divisions (in seconds)
+  # Also track stackable items. EXPERIMENTAL, off by default, two reasons:
+  #
+  # 1. The UUID lives in the item data, and Minecraft only merges stacks whose
+  #    data is identical. A unique UUID on a stackable item therefore stops it
+  #    from stacking in game, which hurts players far more than the duplication
+  #    it catches.
+  # 2. Splitting a stack copies its UUID, so every operation that splits one has
+  #    to be recognised or its pieces look duplicated. Clicks, drags, partial
+  #    pickups and hopper transfers are handled; anything else that splits a
+  #    stack without going through those events can produce a false positive,
+  #    and a false positive here means a real item is deleted.
+  #
+  # Non-stackable items (tools, armour, enchanted books...) have neither problem,
+  # and they are what duplication exploits actually target.
+  track-stackable-items: false
+  # Tolerance for stack divisions (in seconds). Splitting a stack copies its
+  # UUID, so the pieces are allowed to share it for this long. Only relevant
+  # when track-stackable-items is enabled.
   division-tolerance: 30
-  # Maximum number of divisions allowed per stack
+  # Maximum number of pieces one stack may be split into before the copies are
+  # treated as a duplication
   max-divisions-per-stack: 4
 
 # Performance
 performance:
-  # Thread pool size for async tasks
+  # Thread pool size for the analysis stage (1-8)
   thread-pool-size: 2
-  # Enable result caching
+  # Remember which holder each UUID belongs to. This is what allows the plugin to
+  # keep the original copy and remove the others; with it off an arbitrary copy
+  # is kept.
   cache-results: true
-  # Cache TTL (in seconds)
+  # How long a UUID stays in that registry without being seen (in seconds).
+  # Must comfortably exceed scanning.container-interval, or stored items keep
+  # losing their known owner between two chunk sweeps; it is raised automatically
+  # if you set it too low.
   cache-ttl: 300
