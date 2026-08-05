@@ -73,8 +73,8 @@ without passing through those events can still be misreported.
 A scan alternates threads on purpose:
 
 1. **Sweep — main thread, sliced.** Item stacks are not thread safe, so they are
-   only read where that is legal. The sweep is cut into units (one player, one
-   chunk, one world's dropped items) and only `scanning.batch-size` units run per
+   only read where that is legal. The sweep is cut into units (one player, or one
+   chunk with everything it holds) and only `scanning.batch-size` units run per
    tick, so the cost per tick stays bounded whatever the size of the world.
    Missing identifiers are stamped here, and oversized stacks are trimmed.
 2. **Analysis — worker thread.** The sweep produces an immutable snapshot;
@@ -90,16 +90,33 @@ Removal is also confined to the exact recorded slot — anything that moved is
 skipped and picked up by the next scan, because destroying a legitimate item is
 worse than catching a duplicate five seconds later.
 
+### Two cadences
+
+Players and chunks are swept on separate schedules, because they cost very
+different amounts:
+
+| Surface | Setting | Default | Why |
+|---|---|---|---|
+| Online players | `scanning.interval` | 5 s | Cheap, and where items change hands |
+| Loaded chunks | `scanning.container-interval` | 60 s | Expensive and slow moving |
+
+Walking every loaded chunk every five seconds does not finish in five seconds. On
+a server with thousands of loaded chunks the sweep would still be running when the
+next one came due, leaving the plugin permanently sweeping. `/antidupe scan`
+always takes the full path.
+
 ### Coverage
 
 Scanned: player inventories (storage, armour, off hand), the cursor, ender
-chests, every container in loaded chunks, and dropped items.
+chests, every container in loaded chunks, entity inventories (chest minecarts,
+chested horses), the armour and weapon a mob or armour stand wears, items
+displayed in item frames, and dropped items.
 
-Not scanned: inventories carried by entities (chest minecarts, horse chests),
-items nested inside a shulker box held in an inventory, and offline players'
-inventories. Duplicates hidden there are not detected — they are never falsely
-reported either, and they are picked up as soon as the item comes back into view
-(a placed shulker box is a container like any other).
+Not scanned: items nested inside a shulker box that is itself held in an
+inventory, and offline players' inventories. Duplicates hidden there are not
+detected — they are never falsely reported either, and they are picked up as soon
+as the item comes back into view (a placed shulker box is a container like any
+other).
 
 Players holding `antiduplication.bypass` are skipped entirely: their items are
 neither stamped, nor scanned, nor trimmed. Useful for a builder account in
@@ -143,6 +160,7 @@ AntiDuplication/
 │    ├── InventoryScanner     # Sliced main-thread sweep
 │    ├── ScanSnapshot         # Immutable sweep result
 │    ├── DuplicationDetector  # Detection algorithms
+│    ├── RetentionPolicy      # Which copy survives, and how severe it is
 │    └── ItemRemover          # Verification and deletion
 │── listeners/                # Minecraft event handling
 │── commands/                 # Admin commands
@@ -161,8 +179,8 @@ AntiDuplication/
 Configure the plugin via `config.yml`; every option is documented in the file.
 The settings worth knowing about:
 
-* **`scanning.interval` / `batch-size`** – how often scans run, and how much
-  main-thread work each tick may do
+* **`scanning.interval` / `container-interval` / `batch-size`** – how often each
+  surface is swept, and how much main-thread work a tick may do
 * **`security.track-stackable-items`** – tracking for stackable items, with the
   stacking trade-off described above
 * **`security.block-no-uuid`** – destructive; deletes trackable items that carry
