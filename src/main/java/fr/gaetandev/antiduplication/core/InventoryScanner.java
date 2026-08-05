@@ -27,8 +27,13 @@ import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.BlockState;
 import org.bukkit.block.Chest;
+import org.bukkit.entity.Entity;
+import org.bukkit.entity.HumanEntity;
 import org.bukkit.entity.Item;
+import org.bukkit.entity.ItemFrame;
+import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
+import org.bukkit.inventory.EntityEquipment;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
@@ -41,18 +46,26 @@ import java.util.concurrent.CompletableFuture;
 import java.util.logging.Level;
 
 /**
- * Walks every inventory on the server and returns an immutable snapshot.
+ * Walks the inventories of the server and returns an immutable snapshot.
  *
  * <p>Item stacks may only be touched from the main thread, so the sweep runs
- * there — but never in one go. Work is sliced into units (a player, a chunk, the
- * dropped items of a world) and only {@code scanning.batch-size} units run per
- * tick, which keeps the cost per tick bounded whatever the world size. Analysis
- * of the result then happens off-thread.
+ * there — but never in one go. Work is sliced into units (one player, one chunk)
+ * and only {@code scanning.batch-size} units run per tick, which keeps the cost
+ * per tick bounded whatever the size of the world. Analysis of the result then
+ * happens off-thread.
+ *
+ * <p>Everything a chunk holds is scanned as one unit: block containers, entity
+ * inventories, entity equipment and dropped items. Grouping them per chunk rather
+ * than per world is what keeps a world with tens of thousands of entities from
+ * landing in a single tick.
  *
  * <p>Missing UUIDs are stamped as the sweep goes: this is the one place where the
  * plugin already holds a live stack on the right thread.
  */
 public final class InventoryScanner {
+
+    /** Equipment slot index standing for the hand, after the armour slots. */
+    static final int HAND_EQUIPMENT_SLOT = 4;
 
     private final AntiDuplicationPlugin plugin;
     private final ConfigManager config;
@@ -68,13 +81,16 @@ public final class InventoryScanner {
     }
 
     /**
-     * Starts a full sweep of players, containers and dropped items.
+     * Starts a sweep.
      *
+     * @param includeWorlds whether to walk the loaded chunks as well as the online
+     *                      players; players alone are far cheaper and cover the
+     *                      surface items move through most
      * @return the snapshot, completed on the main thread once the sweep is over
      */
-    public CompletableFuture<ScanSnapshot> scanServer() {
+    public CompletableFuture<ScanSnapshot> scanServer(final boolean includeWorlds) {
         final CompletableFuture<ScanSnapshot> result = new CompletableFuture<>();
-        this.runOnMainThread(() -> new Session(result).start());
+        this.runOnMainThread(() -> new Session(result, includeWorlds).start());
         return result;
     }
 
@@ -110,17 +126,18 @@ public final class InventoryScanner {
     private final class Session implements Runnable {
 
         private final CompletableFuture<ScanSnapshot> result;
+        private final boolean includeWorlds;
         private final ScanSnapshot.Builder builder = new ScanSnapshot.Builder();
         private final Deque<Player> players = new ArrayDeque<>();
         private final Deque<Chunk> chunks = new ArrayDeque<>();
-        private final Deque<World> worlds = new ArrayDeque<>();
 
         private long startedAt;
         private long deadline;
         private BukkitTask task;
 
-        Session(final CompletableFuture<ScanSnapshot> result) {
+        Session(final CompletableFuture<ScanSnapshot> result, final boolean includeWorlds) {
             this.result = result;
+            this.includeWorlds = includeWorlds;
         }
 
         void start() {
@@ -128,10 +145,11 @@ public final class InventoryScanner {
             this.deadline = this.startedAt + InventoryScanner.this.config.getScanTimeout();
             this.players.addAll(Bukkit.getOnlinePlayers());
 
-            for (final World world : Bukkit.getWorlds()) {
-                this.worlds.add(world);
-                for (final Chunk chunk : world.getLoadedChunks()) {
-                    this.chunks.add(chunk);
+            if (this.includeWorlds) {
+                for (final World world : Bukkit.getWorlds()) {
+                    for (final Chunk chunk : world.getLoadedChunks()) {
+                        this.chunks.add(chunk);
+                    }
                 }
             }
 
@@ -178,13 +196,8 @@ public final class InventoryScanner {
             final Chunk chunk = this.chunks.poll();
             if (chunk != null) {
                 if (chunk.isLoaded()) {
-                    InventoryScanner.this.scanChunkContainers(chunk, this.builder);
+                    InventoryScanner.this.scanChunk(chunk, this.builder);
                 }
-                return true;
-            }
-            final World world = this.worlds.poll();
-            if (world != null) {
-                InventoryScanner.this.scanDroppedItems(world, this.builder);
                 return true;
             }
             return false;
@@ -231,19 +244,23 @@ public final class InventoryScanner {
         }
     }
 
-    private void scanChunkContainers(final Chunk chunk, final ScanSnapshot.Builder builder) {
-        final BlockState[] tileEntities;
+    private void scanChunk(final Chunk chunk, final ScanSnapshot.Builder builder) {
+        this.scanBlockContainers(chunk, builder);
+        this.scanEntities(chunk, builder);
+    }
+
+    private void scanBlockContainers(final Chunk chunk, final ScanSnapshot.Builder builder) {
+        final BlockState[] blockEntities;
         try {
-            tileEntities = chunk.getTileEntities();
+            blockEntities = chunk.getTileEntities();
         } catch (final RuntimeException e) {
-            this.plugin.getLogger().log(Level.WARNING, "Unable to read block entities of a chunk in "
-                    + chunk.getWorld().getName(), e);
+            this.plugin.getLogger().log(Level.WARNING, "Unable to read the block entities of a chunk", e);
             return;
         }
 
-        for (final BlockState state : tileEntities) {
+        for (final BlockState state : blockEntities) {
             try {
-                final Inventory inventory = resolveInventory(state);
+                final Inventory inventory = resolveBlockInventory(state);
                 if (inventory != null) {
                     this.scanInventory(inventory, builder, ItemLocation.Kind.CONTAINER,
                             null, state.getType().name(), state.getLocation());
@@ -259,32 +276,130 @@ public final class InventoryScanner {
      * which would make every item in it look duplicated. Reading the block
      * inventory keeps each half to its own slots.
      */
-    private static Inventory resolveInventory(final BlockState state) {
+    private static Inventory resolveBlockInventory(final BlockState state) {
         if (state instanceof Chest) {
             return ((Chest) state).getBlockInventory();
         }
         return state instanceof InventoryHolder ? ((InventoryHolder) state).getInventory() : null;
     }
 
-    private void scanDroppedItems(final World world, final ScanSnapshot.Builder builder) {
-        for (final Item entity : world.getEntitiesByClass(Item.class)) {
-            if (entity.isDead()) {
-                continue;
-            }
-            final ItemStack stack = entity.getItemStack();
-            final StackOutcome outcome = this.handleStack(stack, builder,
-                    ItemLocation.ofGround(entity.getUniqueId(), entity.getLocation()));
-            if (outcome == StackOutcome.DELETE) {
-                entity.remove();
-            } else if (outcome == StackOutcome.MODIFIED) {
-                entity.setItemStack(stack);
+    /**
+     * Items an entity carries: a chest minecart or chested horse inventory, the
+     * armour and weapon a mob or armour stand wears, the item an item frame
+     * displays, and items lying on the ground.
+     */
+    private void scanEntities(final Chunk chunk, final ScanSnapshot.Builder builder) {
+        final Entity[] entities;
+        try {
+            entities = chunk.getEntities();
+        } catch (final RuntimeException e) {
+            this.plugin.getLogger().log(Level.WARNING, "Unable to read the entities of a chunk", e);
+            return;
+        }
+
+        for (final Entity entity : entities) {
+            try {
+                this.scanEntity(entity, builder);
+            } catch (final RuntimeException e) {
+                this.plugin.getLogger().log(Level.WARNING, "Unable to scan entity " + entity.getType(), e);
             }
         }
     }
 
+    private void scanEntity(final Entity entity, final ScanSnapshot.Builder builder) {
+        if (entity.isDead()) {
+            return;
+        }
+        // Players are scanned as their own unit; a Player is also an
+        // InventoryHolder, so letting one through here would double count.
+        if (entity instanceof HumanEntity) {
+            return;
+        }
+
+        if (entity instanceof Item) {
+            this.scanDroppedItem((Item) entity, builder);
+            return;
+        }
+        if (entity instanceof ItemFrame) {
+            this.scanItemFrame((ItemFrame) entity, builder);
+            return;
+        }
+        if (entity instanceof InventoryHolder) {
+            this.scanInventory(((InventoryHolder) entity).getInventory(), builder,
+                    ItemLocation.Kind.ENTITY_CONTAINER, entity.getUniqueId(),
+                    entity.getType().name(), entity.getLocation());
+        }
+        if (entity instanceof LivingEntity) {
+            this.scanEquipment((LivingEntity) entity, builder);
+        }
+    }
+
+    private void scanDroppedItem(final Item dropped, final ScanSnapshot.Builder builder) {
+        final ItemStack stack = dropped.getItemStack();
+        final StackOutcome outcome = this.handleStack(stack, builder,
+                ItemLocation.ofGround(dropped.getUniqueId(), dropped.getLocation()));
+        if (outcome == StackOutcome.DELETE) {
+            dropped.remove();
+        } else if (outcome == StackOutcome.MODIFIED) {
+            dropped.setItemStack(stack);
+        }
+    }
+
+    private void scanItemFrame(final ItemFrame frame, final ScanSnapshot.Builder builder) {
+        final ItemStack displayed = frame.getItem();
+        final StackOutcome outcome = this.handleStack(displayed, builder, ItemLocation.ofEntity(
+                ItemLocation.Kind.ENTITY_HELD, frame.getUniqueId(), frame.getType().name(),
+                frame.getLocation(), ItemLocation.NO_SLOT));
+        if (outcome == StackOutcome.DELETE) {
+            frame.setItem(null);
+        } else if (outcome == StackOutcome.MODIFIED) {
+            frame.setItem(displayed);
+        }
+    }
+
+    /**
+     * Armour stands are the usual way a duplicated set of armour gets parked in
+     * the world, and mobs can be dressed in one too.
+     */
+    private void scanEquipment(final LivingEntity entity, final ScanSnapshot.Builder builder) {
+        final EntityEquipment equipment = entity.getEquipment();
+        if (equipment == null) {
+            return;
+        }
+
+        final ItemStack[] armor = equipment.getArmorContents();
+        boolean armorChanged = false;
+        for (int slot = 0; slot < armor.length; slot++) {
+            final StackOutcome outcome = this.handleStack(armor[slot], builder, this.equipmentLocation(entity, slot));
+            if (outcome == StackOutcome.DELETE) {
+                armor[slot] = null;
+                armorChanged = true;
+            } else if (outcome == StackOutcome.MODIFIED) {
+                armorChanged = true;
+            }
+        }
+        if (armorChanged) {
+            equipment.setArmorContents(armor);
+        }
+
+        final ItemStack held = equipment.getItemInHand();
+        final StackOutcome outcome = this.handleStack(held, builder,
+                this.equipmentLocation(entity, HAND_EQUIPMENT_SLOT));
+        if (outcome == StackOutcome.DELETE) {
+            equipment.setItemInHand(null);
+        } else if (outcome == StackOutcome.MODIFIED) {
+            equipment.setItemInHand(held);
+        }
+    }
+
+    private ItemLocation equipmentLocation(final LivingEntity entity, final int slot) {
+        return ItemLocation.ofEntity(ItemLocation.Kind.ENTITY_EQUIPMENT, entity.getUniqueId(),
+                entity.getType().name(), entity.getLocation(), slot);
+    }
+
     private void scanInventory(final Inventory inventory, final ScanSnapshot.Builder builder,
                                final ItemLocation.Kind kind, final UUID holderId,
-                               final String holderName, final Location blockLocation) {
+                               final String holderName, final Location location) {
         if (inventory == null) {
             return;
         }
@@ -294,17 +409,24 @@ public final class InventoryScanner {
             if (stack == null || stack.getType() == Material.AIR) {
                 continue;
             }
-            final ItemLocation location = kind == ItemLocation.Kind.CONTAINER
-                    ? ItemLocation.ofContainer(holderName, blockLocation, slot)
-                    : ItemLocation.ofPlayer(kind, holderId, holderName, slot);
-
-            final StackOutcome outcome = this.handleStack(stack, builder, location);
+            final StackOutcome outcome = this.handleStack(stack, builder,
+                    locationFor(kind, holderId, holderName, location, slot));
             if (outcome == StackOutcome.DELETE) {
                 inventory.setItem(slot, null);
             } else if (outcome == StackOutcome.MODIFIED) {
                 inventory.setItem(slot, stack);
             }
         }
+    }
+
+    private static ItemLocation locationFor(final ItemLocation.Kind kind, final UUID holderId,
+                                            final String holderName, final Location location, final int slot) {
+        if (kind == ItemLocation.Kind.CONTAINER) {
+            return ItemLocation.ofContainer(holderName, location, slot);
+        }
+        return kind.isEntityHeld()
+                ? ItemLocation.ofEntity(kind, holderId, holderName, location, slot)
+                : ItemLocation.ofPlayer(kind, holderId, holderName, slot);
     }
 
     /**

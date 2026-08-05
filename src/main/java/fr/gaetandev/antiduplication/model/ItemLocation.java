@@ -30,29 +30,56 @@ import java.util.UUID;
  */
 public final class ItemLocation {
 
+    /**
+     * Kinds of holder, each with the rank used to decide which copy of a
+     * duplicated item survives: the lower the rank, the stronger the claim.
+     * Ranking is explicit rather than relying on declaration order, so adding a
+     * kind cannot silently reshuffle the decision.
+     */
     public enum Kind {
-        PLAYER_INVENTORY("Player inventory"),
-        PLAYER_ENDER_CHEST("Ender chest"),
-        PLAYER_CURSOR("Player cursor"),
-        CONTAINER("Container"),
-        GROUND("Dropped item");
+        PLAYER_INVENTORY("Player inventory", 0),
+        PLAYER_ENDER_CHEST("Ender chest", 1),
+        PLAYER_CURSOR("Player cursor", 2),
+        CONTAINER("Container", 3),
+        ENTITY_CONTAINER("Entity container", 4),
+        ENTITY_EQUIPMENT("Entity equipment", 5),
+        ENTITY_HELD("Displayed item", 6),
+        GROUND("Dropped item", 7);
 
         private final String description;
+        private final int retentionRank;
 
-        Kind(final String description) {
+        Kind(final String description, final int retentionRank) {
             this.description = description;
+            this.retentionRank = retentionRank;
         }
 
         public String getDescription() {
             return this.description;
         }
 
+        /**
+         * @return how strong this holder's claim to the item is when a tie has to
+         *         be broken; lower wins
+         */
+        public int getRetentionRank() {
+            return this.retentionRank;
+        }
+
         public boolean isPlayerHeld() {
             return this == PLAYER_INVENTORY || this == PLAYER_ENDER_CHEST || this == PLAYER_CURSOR;
         }
+
+        /**
+         * @return whether the holder is an entity addressed by its unique id
+         */
+        public boolean isEntityHeld() {
+            return this == ENTITY_CONTAINER || this == ENTITY_EQUIPMENT
+                    || this == ENTITY_HELD || this == GROUND;
+        }
     }
 
-    /** Slot value for locations that are not backed by an inventory slot. */
+    /** Slot value for locations that are not backed by an indexed slot. */
     public static final int NO_SLOT = -1;
 
     private final Kind kind;
@@ -60,6 +87,12 @@ public final class ItemLocation {
     private final String holderName;
     private final Location blockLocation;
     private final int slot;
+
+    /**
+     * Derived from the fields above and never changes. Computed on first use
+     * because it is asked for once per tracked item on every scan.
+     */
+    private String ownerKey;
 
     private ItemLocation(final Kind kind, final UUID holderId, final String holderName,
                          final Location blockLocation, final int slot) {
@@ -78,8 +111,17 @@ public final class ItemLocation {
         return new ItemLocation(Kind.CONTAINER, null, containerName, blockLocation, slot);
     }
 
-    public static ItemLocation ofGround(final UUID entityId, final Location blockLocation) {
-        return new ItemLocation(Kind.GROUND, entityId, "GROUND", blockLocation, NO_SLOT);
+    /**
+     * An item held by an entity: inside its inventory, worn as equipment, or
+     * displayed by it.
+     */
+    public static ItemLocation ofEntity(final Kind kind, final UUID entityId, final String entityName,
+                                        final Location location, final int slot) {
+        return new ItemLocation(kind, entityId, entityName, location, slot);
+    }
+
+    public static ItemLocation ofGround(final UUID entityId, final Location location) {
+        return new ItemLocation(Kind.GROUND, entityId, "GROUND", location, NO_SLOT);
     }
 
     public Kind getKind() {
@@ -87,14 +129,15 @@ public final class ItemLocation {
     }
 
     /**
-     * @return the player or entity unique id, {@code null} for containers
+     * @return the player or entity unique id, {@code null} for block containers
      */
     public UUID getHolderId() {
         return this.holderId;
     }
 
     /**
-     * @return the player name or the container type, never {@code null} in practice
+     * @return the player name, entity type or container type, never {@code null}
+     *         in practice
      */
     public String getHolderName() {
         return this.holderName;
@@ -110,9 +153,19 @@ public final class ItemLocation {
 
     /**
      * Stable identity of the holder, used to recognise the original owner of a
-     * UUID from one scan to the next.
+     * UUID from one scan to the next. Deliberately excludes the slot: moving an
+     * item within one inventory does not change who owns it.
      */
     public String getOwnerKey() {
+        String key = this.ownerKey;
+        if (key == null) {
+            key = this.computeOwnerKey();
+            this.ownerKey = key;
+        }
+        return key;
+    }
+
+    private String computeOwnerKey() {
         if (this.holderId != null) {
             return this.kind.name() + ':' + this.holderId;
         }
@@ -129,9 +182,18 @@ public final class ItemLocation {
             case PLAYER_CURSOR:
                 return this.slot == NO_SLOT
                         ? String.format("Player %s (%s)", this.holderName, this.kind.getDescription())
-                        : String.format("Player %s (%s, slot %d)", this.holderName, this.kind.getDescription(), this.slot);
+                        : String.format("Player %s (%s, slot %d)",
+                        this.holderName, this.kind.getDescription(), this.slot);
             case CONTAINER:
-                return String.format("%s at %s (slot %d)", this.holderName, describeBlock(this.blockLocation), this.slot);
+                return String.format("%s at %s (slot %d)",
+                        this.holderName, describeBlock(this.blockLocation), this.slot);
+            case ENTITY_CONTAINER:
+            case ENTITY_EQUIPMENT:
+                return String.format("%s (%s, slot %d) at %s", this.holderName,
+                        this.kind.getDescription(), this.slot, describeBlock(this.blockLocation));
+            case ENTITY_HELD:
+                return String.format("%s (%s) at %s", this.holderName,
+                        this.kind.getDescription(), describeBlock(this.blockLocation));
             case GROUND:
                 return String.format("Dropped item at %s", describeBlock(this.blockLocation));
             default:
@@ -147,29 +209,25 @@ public final class ItemLocation {
      * log call — places that must never fail.
      */
     public String getWorldName() {
-        if (this.blockLocation == null) {
-            return null;
-        }
-        try {
-            final org.bukkit.World world = this.blockLocation.getWorld();
-            return world != null ? world.getName() : null;
-        } catch (final RuntimeException e) {
-            return null;
-        }
+        return this.blockLocation == null ? null : worldNameOf(this.blockLocation);
     }
 
     private static String describeBlock(final Location location) {
         if (location == null) {
             return "unknown position";
         }
-        String world;
-        try {
-            world = location.getWorld() != null ? location.getWorld().getName() : null;
-        } catch (final RuntimeException e) {
-            world = null;
-        }
+        final String world = worldNameOf(location);
         return String.format("%d,%d,%d in %s", location.getBlockX(), location.getBlockY(),
                 location.getBlockZ(), world != null ? world : "unknown world");
+    }
+
+    private static String worldNameOf(final Location location) {
+        try {
+            final org.bukkit.World world = location.getWorld();
+            return world != null ? world.getName() : null;
+        } catch (final RuntimeException e) {
+            return null;
+        }
     }
 
     @Override
