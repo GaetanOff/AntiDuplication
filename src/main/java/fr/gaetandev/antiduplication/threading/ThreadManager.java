@@ -156,10 +156,13 @@ public final class ThreadManager {
 
     /**
      * Runs the whole pipeline once: sweep, analyse, then remove.
+     *
+     * @param includeContainers whether this cycle walks the loaded chunks as well
+     *                          as the online players
      */
-    public CompletableFuture<ScanResult> runScan(final String trigger) {
+    public CompletableFuture<ScanResult> runScan(final String trigger, final boolean includeContainers) {
         final long startTime = System.currentTimeMillis();
-        return this.detector.performFullScan()
+        return this.detector.performFullScan(includeContainers)
                 .thenCompose(this::applyEvents)
                 .handle((removed, throwable) -> {
                     final long duration = System.currentTimeMillis() - startTime;

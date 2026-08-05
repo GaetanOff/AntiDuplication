@@ -3,11 +3,20 @@
 
 # Scan settings
 scanning:
-  # Interval between each scan (in seconds)
+  # Interval between each scan of the online players (in seconds). Cheap, and
+  # this is where items actually change hands.
   interval: 5
-  # Scan units processed per server tick. A unit is one player, one chunk, or
-  # the dropped items of one world. Lower it if a scan is noticeable on a very
-  # large world, raise it to finish scans faster.
+  # Interval between each sweep of the loaded chunks: block containers, entity
+  # inventories, equipment, item frames and dropped items (in seconds).
+  #
+  # Kept separate on purpose. Chunks are the expensive half of a sweep and the
+  # slow moving one: on a server with thousands of loaded chunks, walking them
+  # every player cycle would leave the plugin permanently sweeping. 0 disables
+  # chunk scanning entirely (players only).
+  container-interval: 60
+  # Scan units processed per server tick. A unit is one player or one chunk
+  # (with everything that chunk holds). Lower it if a scan is noticeable on a
+  # very large world, raise it to finish sweeps faster.
   batch-size: 100
   # Maximum duration of one scan (in milliseconds). A scan that runs out of time
   # stops where it is and reports a partial result; the next one starts over.
@@ -102,5 +111,8 @@ performance:
   # keep the original copy and remove the others; with it off an arbitrary copy
   # is kept.
   cache-results: true
-  # How long a UUID stays in that registry without being seen (in seconds)
+  # How long a UUID stays in that registry without being seen (in seconds).
+  # Must comfortably exceed scanning.container-interval, or stored items keep
+  # losing their known owner between two chunk sweeps; it is raised automatically
+  # if you set it too low.
   cache-ttl: 300

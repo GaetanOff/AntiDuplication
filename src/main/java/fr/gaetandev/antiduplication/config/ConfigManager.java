@@ -38,6 +38,7 @@ public final class ConfigManager {
     private FileConfiguration config;
 
     private int scanInterval;
+    private int containerInterval;
     private int batchSize;
     private long scanTimeout;
 
@@ -93,6 +94,7 @@ public final class ConfigManager {
     private void cacheConfigValues() {
         // Scanning
         this.scanInterval = Math.max(1, this.config.getInt("scanning.interval", 5));
+        this.containerInterval = Math.max(0, this.config.getInt("scanning.container-interval", 60));
         this.batchSize = Math.max(1, Math.min(2000, this.config.getInt("scanning.batch-size", 100)));
         this.scanTimeout = Math.max(1000L, this.config.getLong("scanning.timeout", 30000L));
 
@@ -156,9 +158,26 @@ public final class ConfigManager {
             this.plugin.getLogger().warning("security.block-no-uuid is enabled: trackable items without a UUID "
                     + "will be deleted instead of being stamped. This is destructive.");
         }
+        if (this.containerInterval > 0 && this.containerInterval < this.scanInterval) {
+            this.plugin.getLogger().warning("scanning.container-interval is shorter than scanning.interval; "
+                    + "chunks cannot be walked more often than a scan runs, aligning them.");
+            this.containerInterval = this.scanInterval;
+        }
+        if (this.containerInterval == 0) {
+            this.plugin.getLogger().warning("scanning.container-interval is 0: containers, entities and dropped "
+                    + "items are never scanned, only online players.");
+        }
         if (!this.cacheResults) {
             this.plugin.getLogger().warning("performance.cache-results is disabled: the plugin can no longer tell "
                     + "an original from a copy, and will keep an arbitrary copy when a duplication is found.");
+        } else if (this.containerInterval > 0 && this.cacheTtl < this.containerInterval * 2L) {
+            // Items sitting in a chest are only seen on container cycles, so a TTL
+            // shorter than that keeps forgetting who owns them.
+            this.plugin.getLogger().warning("performance.cache-ttl (" + this.cacheTtl + "s) is short compared to "
+                    + "scanning.container-interval (" + this.containerInterval + "s): stored items would keep "
+                    + "losing their known owner between two chunk sweeps. Raising the TTL to "
+                    + this.containerInterval * 2L + "s.");
+            this.cacheTtl = this.containerInterval * 2L;
         }
     }
 
@@ -189,6 +208,27 @@ public final class ConfigManager {
 
     public long getScanIntervalMillis() {
         return TimeUnit.SECONDS.toMillis(this.scanInterval);
+    }
+
+    /**
+     * How often the loaded chunks are walked, as opposed to the online players.
+     *
+     * <p>Chunks are the expensive half of a sweep and the slow moving one, while
+     * players are cheap and where items actually change hands. Walking chunks on
+     * every player cycle would leave a busy server permanently sweeping.
+     *
+     * @return the interval in seconds, or {@code 0} to never walk chunks
+     */
+    public int getContainerInterval() {
+        return this.containerInterval;
+    }
+
+    public long getContainerIntervalMillis() {
+        return TimeUnit.SECONDS.toMillis(this.containerInterval);
+    }
+
+    public boolean isContainerScanEnabled() {
+        return this.containerInterval > 0;
     }
 
     /**

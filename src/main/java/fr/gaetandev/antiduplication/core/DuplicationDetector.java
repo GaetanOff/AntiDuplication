@@ -19,7 +19,6 @@ package fr.gaetandev.antiduplication.core;
 import fr.gaetandev.antiduplication.AntiDuplicationPlugin;
 import fr.gaetandev.antiduplication.config.ConfigManager;
 import fr.gaetandev.antiduplication.model.DuplicationEvent;
-import fr.gaetandev.antiduplication.model.ItemLocation;
 import fr.gaetandev.antiduplication.model.TrackedItem;
 import fr.gaetandev.antiduplication.storage.RedisRegistry;
 import org.bukkit.entity.Player;
@@ -27,8 +26,6 @@ import org.bukkit.entity.Player;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -76,18 +73,21 @@ public final class DuplicationDetector {
     }
 
     /**
-     * Sweeps the whole server and analyses the result.
+     * Sweeps the server and analyses the result.
      *
+     * @param includeContainers whether to walk the loaded chunks too, or only the
+     *                          online players
      * @return the events to apply; an empty list when a sweep is already running
      */
-    public CompletableFuture<List<DuplicationEvent>> performFullScan() {
+    public CompletableFuture<List<DuplicationEvent>> performFullScan(final boolean includeContainers) {
         if (!this.scanInProgress.compareAndSet(false, true)) {
-            this.plugin.getLogger().fine("A scan is already running, this one is skipped");
+            this.plugin.debug("A scan is already running, this one is skipped");
             return CompletableFuture.completedFuture(Collections.<DuplicationEvent>emptyList());
         }
 
-        return this.scanner.scanServer()
-                .thenApplyAsync(snapshot -> this.analyse(snapshot, "full_scan"), this.analysisExecutor)
+        final String method = includeContainers ? "full_scan" : "player_sweep";
+        return this.scanner.scanServer(includeContainers)
+                .thenApplyAsync(snapshot -> this.analyse(snapshot, method), this.analysisExecutor)
                 .handle((events, throwable) -> {
                     this.scanInProgress.set(false);
                     if (throwable != null) {
@@ -188,7 +188,7 @@ public final class DuplicationDetector {
 
     private DuplicationEvent buildEvent(final String uuid, final List<TrackedItem> copies,
                                         final String method, final long scanDurationMs) {
-        final TrackedItem retained = this.chooseRetainedCopy(uuid, copies);
+        final TrackedItem retained = RetentionPolicy.chooseRetained(this.itemManager.knownOwner(uuid), copies);
         final Instant firstSeen = this.itemManager.firstSeen(uuid);
 
         return new DuplicationEvent.Builder()
@@ -197,9 +197,9 @@ public final class DuplicationDetector {
                 .retainedItem(firstSeen == null ? retained : retained.withFirstSeen(firstSeen))
                 .detectionTime(Instant.now())
                 .detectionMethod(method)
-                .severity(this.calculateSeverity(copies))
+                .severity(RetentionPolicy.severityOf(copies.size(), this.holdsValuableItem(copies)))
                 .scanDurationMs(scanDurationMs)
-                .additionalInfo(describeSpread(copies))
+                .additionalInfo(RetentionPolicy.describeSpread(copies))
                 .build();
     }
 
@@ -211,86 +211,13 @@ public final class DuplicationDetector {
         return dated;
     }
 
-    /**
-     * Picks the copy that stays. The holder the UUID was last seen at wins,
-     * which keeps the original in place and deletes what appeared elsewhere. With
-     * no history, a stable ordering is used so the decision does not depend on
-     * iteration order.
-     */
-    private TrackedItem chooseRetainedCopy(final String uuid, final List<TrackedItem> copies) {
-        final String knownOwner = this.itemManager.knownOwner(uuid);
-        if (knownOwner != null) {
-            for (final TrackedItem copy : copies) {
-                if (knownOwner.equals(copy.getItemLocation().getOwnerKey())) {
-                    return copy;
-                }
-            }
-        }
-        return Collections.min(copies, RETENTION_ORDER);
-    }
-
-    /**
-     * Deterministic fallback ordering: prefer a copy held by a player over one
-     * lying in a container or on the ground, then order by holder and slot.
-     */
-    private static final Comparator<TrackedItem> RETENTION_ORDER = new Comparator<TrackedItem>() {
-        @Override
-        public int compare(final TrackedItem left, final TrackedItem right) {
-            final ItemLocation leftLocation = left.getItemLocation();
-            final ItemLocation rightLocation = right.getItemLocation();
-            final int byKind = Integer.compare(leftLocation.getKind().ordinal(), rightLocation.getKind().ordinal());
-            if (byKind != 0) {
-                return byKind;
-            }
-            final int byOwner = leftLocation.getOwnerKey().compareTo(rightLocation.getOwnerKey());
-            return byOwner != 0 ? byOwner : Integer.compare(leftLocation.getSlot(), rightLocation.getSlot());
-        }
-    };
-
-    private DuplicationEvent.Severity calculateSeverity(final List<TrackedItem> copies) {
-        final int count = copies.size();
-        boolean valuable = false;
+    private boolean holdsValuableItem(final List<TrackedItem> copies) {
         for (final TrackedItem copy : copies) {
             if (this.itemManager.getStackManager().isValuable(copy.getMaterial())) {
-                valuable = true;
-                break;
+                return true;
             }
         }
-
-        if (count >= 10 || (count >= 5 && valuable)) {
-            return DuplicationEvent.Severity.CRITICAL;
-        }
-        if (count >= 5 || (count >= 3 && valuable)) {
-            return DuplicationEvent.Severity.HIGH;
-        }
-        return count >= 3 ? DuplicationEvent.Severity.MEDIUM : DuplicationEvent.Severity.LOW;
-    }
-
-    /**
-     * Short summary of how far a duplication has spread, which is the first thing
-     * an administrator wants to know.
-     */
-    private static String describeSpread(final List<TrackedItem> copies) {
-        final Set<String> players = new HashSet<>();
-        final Set<String> containers = new HashSet<>();
-        for (final TrackedItem copy : copies) {
-            if (copy.getPlayerName() != null) {
-                players.add(copy.getPlayerName());
-            } else {
-                containers.add(copy.getContainer());
-            }
-        }
-
-        final StringBuilder info = new StringBuilder();
-        if (players.size() == 1) {
-            info.append("All copies held by ").append(players.iterator().next()).append(". ");
-        } else if (players.size() > 1) {
-            info.append("Copies spread across ").append(players.size()).append(" players. ");
-        }
-        if (!containers.isEmpty()) {
-            info.append("Also present in ").append(containers).append('.');
-        }
-        return info.toString().trim();
+        return false;
     }
 
     public boolean isScanInProgress() {

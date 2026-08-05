@@ -105,7 +105,9 @@ public final class AntiDupeCommand implements CommandExecutor, TabCompleter {
             return true;
         }
         sender.sendMessage(ChatColor.YELLOW + "Starting a full scan...");
-        this.reportWhenComplete(sender, this.threadManager.runScan("manual_scan"));
+        // A manual scan always walks the chunks: the operator asked for the
+        // expensive pass, not the light player cycle.
+        this.reportWhenComplete(sender, this.threadManager.runScan("manual_scan", true));
         return true;
     }
 

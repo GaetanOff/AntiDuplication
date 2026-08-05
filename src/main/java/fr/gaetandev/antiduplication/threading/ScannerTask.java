@@ -17,6 +17,7 @@
 package fr.gaetandev.antiduplication.threading;
 
 import fr.gaetandev.antiduplication.AntiDuplicationPlugin;
+import fr.gaetandev.antiduplication.config.ConfigManager;
 
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -37,9 +38,13 @@ public final class ScannerTask implements Runnable {
 
     private final AtomicInteger scansPerformed = new AtomicInteger();
     private final AtomicInteger scansSkipped = new AtomicInteger();
+    private final AtomicInteger containerCycles = new AtomicInteger();
     private final AtomicInteger duplicationsFound = new AtomicInteger();
     private final AtomicInteger copiesRemoved = new AtomicInteger();
     private final AtomicLong lastRunTime = new AtomicLong();
+
+    /** When the loaded chunks were last walked; 0 until the first cycle. */
+    private final AtomicLong lastContainerCycle = new AtomicLong();
 
     public ScannerTask(final AntiDuplicationPlugin plugin, final ThreadManager threadManager) {
         this.plugin = plugin;
@@ -57,8 +62,14 @@ public final class ScannerTask implements Runnable {
             return;
         }
 
+        final boolean includeContainers = this.isContainerCycleDue();
+        if (includeContainers) {
+            this.lastContainerCycle.set(System.currentTimeMillis());
+            this.containerCycles.incrementAndGet();
+        }
+
         try {
-            this.threadManager.runScan("scheduled_scan").whenComplete((result, throwable) -> {
+            this.threadManager.runScan("scheduled_scan", includeContainers).whenComplete((result, throwable) -> {
                 this.scansPerformed.incrementAndGet();
                 if (throwable != null) {
                     this.plugin.getLogger().log(Level.WARNING, "Error during the scheduled scan", throwable);
@@ -94,9 +105,24 @@ public final class ScannerTask implements Runnable {
         return true;
     }
 
+    /**
+     * Chunks are walked on their own, slower cadence: they are the expensive half
+     * of a sweep and the slow moving one, while players are cheap and are where
+     * items actually change hands.
+     */
+    private boolean isContainerCycleDue() {
+        final ConfigManager config = this.plugin.getConfigManager();
+        if (!config.isContainerScanEnabled()) {
+            return false;
+        }
+        final long last = this.lastContainerCycle.get();
+        return last == 0L || System.currentTimeMillis() - last >= config.getContainerIntervalMillis();
+    }
+
     public String getPerformanceReport() {
-        return String.format("Scans: %d (%d skipped), duplications: %d, copies removed: %d, last run: %dms",
-                this.scansPerformed.get(), this.scansSkipped.get(),
+        return String.format(
+                "Scans: %d (%d with chunks, %d skipped), duplications: %d, copies removed: %d, last run: %dms",
+                this.scansPerformed.get(), this.containerCycles.get(), this.scansSkipped.get(),
                 this.duplicationsFound.get(), this.copiesRemoved.get(), this.lastRunTime.get());
     }
 }
