@@ -184,21 +184,37 @@ public final class TrackedItem {
         }
 
         /**
-         * Reads material, amount, durability and display name off a live stack.
-         * Must be called from the main thread.
+         * Reads the cheap properties of a live stack: type, amount and
+         * durability, none of which touch the item data.
+         *
+         * <p>Deliberately excludes the display name. This runs for every tracked
+         * item of every sweep, and reading the name means copying the whole item
+         * data — a cost paid thousands of times per scan for something only used
+         * when a duplication is actually reported. Use
+         * {@link #withDisplayNameOf(ItemStack)} on that path instead.
+         *
+         * <p>Must be called from the main thread.
          */
         public Builder fromItemStack(final ItemStack itemStack) {
             if (itemStack != null && itemStack.getType() != Material.AIR) {
                 this.material = itemStack.getType();
                 this.amount = itemStack.getAmount();
                 this.durability = itemStack.getDurability();
-                if (itemStack.hasItemMeta()) {
-                    // getItemMeta() copies the item data every call, so it is read
-                    // once: this runs for every tracked item of every sweep.
-                    final ItemMeta meta = itemStack.getItemMeta();
-                    if (meta != null && meta.hasDisplayName()) {
-                        this.displayName = meta.getDisplayName();
-                    }
+            }
+            return this;
+        }
+
+        /**
+         * Reads the display name off a live stack, which requires copying the item
+         * data. Reserved for the few items a report is built from.
+         *
+         * <p>Must be called from the main thread.
+         */
+        public Builder withDisplayNameOf(final ItemStack itemStack) {
+            if (itemStack != null && itemStack.getType() != Material.AIR && itemStack.hasItemMeta()) {
+                final ItemMeta meta = itemStack.getItemMeta();
+                if (meta != null && meta.hasDisplayName()) {
+                    this.displayName = meta.getDisplayName();
                 }
             }
             return this;

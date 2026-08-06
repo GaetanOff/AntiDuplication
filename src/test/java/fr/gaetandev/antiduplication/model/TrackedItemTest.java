@@ -17,6 +17,7 @@
 package fr.gaetandev.antiduplication.model;
 
 import org.bukkit.Material;
+import org.bukkit.inventory.ItemStack;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -78,6 +79,25 @@ class TrackedItemTest {
                 .build()
                 .getItemDescription())
                 .isEqualTo("DIAMOND_SWORD x3 (durability: 50) \"Excalibur\"");
+    }
+
+    @Test
+    @DisplayName("The sweep path records no display name, keeping item data untouched")
+    void testFromItemStackSkipsDisplayName() {
+        final ItemStack stack = new ItemStack(Material.DIAMOND_SWORD, 1, (short) 7);
+
+        final TrackedItem item = new TrackedItem.Builder()
+                .uuid("TEST_12345678")
+                .fromItemStack(stack)
+                .location(ItemLocation.ofPlayer(
+                        ItemLocation.Kind.PLAYER_INVENTORY, PLAYER_ID, "TestPlayer", 0))
+                .build();
+
+        assertThat(item.getMaterial()).isEqualTo(Material.DIAMOND_SWORD);
+        assertThat(item.getAmount()).isEqualTo(1);
+        assertThat(item.getDurability()).isEqualTo((short) 7);
+        // Reading the name would copy the item data; the reporting path does that.
+        assertThat(item.getDisplayName()).isNull();
     }
 
     @Test

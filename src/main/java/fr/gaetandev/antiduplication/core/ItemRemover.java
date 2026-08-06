@@ -66,7 +66,8 @@ public final class ItemRemover {
     }
 
     /**
-     * Whether the recorded location still holds this exact UUID.
+     * Re-reads the recorded location and returns the live stack if it still
+     * carries this exact UUID.
      *
      * <p>This is what makes a multi-tick sweep safe. Players and chunks are
      * scanned in different ticks, so an item carried from an inventory to a chest
@@ -75,10 +76,16 @@ public final class ItemRemover {
      * item can only be in one place at a time, so at most as many copies survive
      * the check as really exist.
      *
+     * <p>The stack is handed back rather than a boolean so the caller can describe
+     * the item from what is really there, at the moment it acts.
+     *
      * <p>Must be called from the main thread.
+     *
+     * @return the live stack, or {@code null} when that location no longer holds it
      */
-    public boolean stillPresent(final TrackedItem item) {
-        return this.matches(this.readItem(item.getItemLocation()), item.getUuid());
+    public ItemStack confirm(final TrackedItem item) {
+        final ItemStack live = this.readItem(item.getItemLocation());
+        return this.matches(live, item.getUuid()) ? live : null;
     }
 
     /**

@@ -210,8 +210,7 @@ public final class ItemManager {
 
         // The elected copy may itself have been a ghost, so re-elect among the
         // survivors and carry on with a finding that matches reality.
-        final TrackedItem retained = live.contains(event.getRetainedItem())
-                ? event.getRetainedItem() : live.get(0);
+        final TrackedItem retained = electRetained(live, event.getRetainedItem());
         final DuplicationEvent confirmed = event.narrowedTo(live, retained);
 
         int removed = 0;
@@ -259,8 +258,9 @@ public final class ItemManager {
     private List<TrackedItem> confirmStillDuplicated(final DuplicationEvent event) {
         final List<TrackedItem> live = new ArrayList<>(event.getDuplicateCount());
         for (final TrackedItem copy : event.getDuplicatedItems()) {
-            if (this.itemRemover.stillPresent(copy)) {
-                live.add(copy);
+            final ItemStack stack = this.itemRemover.confirm(copy);
+            if (stack != null) {
+                live.add(describe(copy, stack));
             }
         }
 
@@ -273,6 +273,42 @@ public final class ItemManager {
             return Collections.emptyList();
         }
         return live;
+    }
+
+    /**
+     * Rebuilds a copy from the stack that is really there, right now.
+     *
+     * <p>The sweep records only the cheap properties of an item, because reading
+     * its display name means copying the item data and that would be paid for
+     * every tracked item of every scan. Here there are at most a handful of items
+     * and a report is about to be written, so the full detail is worth its cost —
+     * and it describes the item as it is at deletion time rather than as it was
+     * when the sweep passed by.
+     */
+    private static TrackedItem describe(final TrackedItem copy, final ItemStack stack) {
+        return new TrackedItem.Builder()
+                .uuid(copy.getUuid())
+                .fromItemStack(stack)
+                .withDisplayNameOf(stack)
+                .location(copy.getItemLocation())
+                .firstSeen(copy.getFirstSeen())
+                .lastSeen(copy.getLastSeen())
+                .build();
+    }
+
+    /**
+     * Re-elects the copy to keep among the survivors.
+     *
+     * <p>Returns the survivor equal to {@code preferred} so the finding carries
+     * the refreshed instance rather than the stale one the sweep produced.
+     */
+    private static TrackedItem electRetained(final List<TrackedItem> live, final TrackedItem preferred) {
+        for (final TrackedItem candidate : live) {
+            if (candidate.equals(preferred)) {
+                return candidate;
+            }
+        }
+        return live.get(0);
     }
 
     private void notifyAdministrators(final DuplicationEvent event) {
