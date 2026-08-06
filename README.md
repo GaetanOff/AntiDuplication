@@ -74,9 +74,12 @@ A scan alternates threads on purpose:
 
 1. **Sweep — main thread, sliced.** Item stacks are not thread safe, so they are
    only read where that is legal. The sweep is cut into units (one player, or one
-   chunk with everything it holds) and only `scanning.batch-size` units run per
-   tick, so the cost per tick stays bounded whatever the size of the world.
-   Missing identifiers are stamped here, and oversized stacks are trimmed.
+   chunk with everything it holds), and a slice stops at `scanning.batch-size`
+   units *or* `scanning.max-tick-time` milliseconds, whichever comes first — units
+   are not equal, so only the time ceiling really bounds a tick. While the server
+   is running behind, the sweep throttles itself to one unit per tick: it keeps
+   making progress without adding to a load that is already too high. Missing
+   identifiers are stamped here, and oversized stacks are trimmed.
 2. **Analysis — worker thread.** The sweep produces an immutable snapshot;
    grouping, severity, and the optional Redis round trips all happen off the
    server thread.
@@ -179,8 +182,9 @@ AntiDuplication/
 Configure the plugin via `config.yml`; every option is documented in the file.
 The settings worth knowing about:
 
-* **`scanning.interval` / `container-interval` / `batch-size`** – how often each
-  surface is swept, and how much main-thread work a tick may do
+* **`scanning.interval` / `container-interval`** – how often each surface is swept
+* **`scanning.batch-size` / `max-tick-time`** – how much main-thread work a single
+  tick may do; the time ceiling is the one that really bounds it
 * **`security.track-stackable-items`** – tracking for stackable items, with the
   stacking trade-off described above
 * **`security.block-no-uuid`** – destructive; deletes trackable items that carry
