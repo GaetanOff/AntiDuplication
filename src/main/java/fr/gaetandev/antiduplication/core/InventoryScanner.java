@@ -68,6 +68,15 @@ public final class InventoryScanner {
     /** Equipment slot index standing for the hand, after the armour slots. */
     static final int HAND_EQUIPMENT_SLOT = 4;
 
+    /** Nominal length of a server tick, the yardstick for "is the server keeping up". */
+    private static final long EXPECTED_TICK_MILLIS = 50L;
+
+    /**
+     * How far a tick may overrun before the sweep considers the server busy.
+     * Loose enough not to react to a single hiccup.
+     */
+    private static final double LAG_TOLERANCE = 1.5D;
+
     private final AntiDuplicationPlugin plugin;
     private final ConfigManager config;
     private final ItemManager itemManager;
@@ -136,6 +145,11 @@ public final class InventoryScanner {
         private long deadline;
         private BukkitTask task;
 
+        /** When the previous slice ran, used to infer whether the server keeps up. */
+        private long lastTickAt;
+        private int laggedTicks;
+        private int yieldedTicks;
+
         Session(final CompletableFuture<ScanSnapshot> result, final boolean includeWorlds) {
             this.result = result;
             this.includeWorlds = includeWorlds;
@@ -160,16 +174,27 @@ public final class InventoryScanner {
 
         @Override
         public void run() {
-            int budget = InventoryScanner.this.config.getBatchSize();
+            final long now = System.currentTimeMillis();
+            if (now > this.deadline) {
+                this.builder.markTruncated();
+                InventoryScanner.this.plugin.getLogger().warning(String.format(
+                        "Scan budget of %dms exhausted: %d players and %d chunks left unscanned",
+                        InventoryScanner.this.config.getScanTimeout(),
+                        this.players.size(), this.chunks.size()));
+                this.finish();
+                return;
+            }
+
+            final int budget = this.budgetForThisTick(now);
+            final long sliceDeadline = now + InventoryScanner.this.config.getMaxTickMillis();
+            this.lastTickAt = now;
+
             try {
-                while (budget-- > 0) {
-                    if (System.currentTimeMillis() > this.deadline) {
-                        this.builder.markTruncated();
-                        InventoryScanner.this.plugin.getLogger().warning(String.format(
-                                "Scan budget of %dms exhausted: %d players and %d chunks left unscanned",
-                                InventoryScanner.this.config.getScanTimeout(),
-                                this.players.size(), this.chunks.size()));
-                        this.finish();
+                for (int processed = 0; processed < budget; processed++) {
+                    // Checked after the first unit, so a slice always makes
+                    // progress however tight the time budget is.
+                    if (processed > 0 && System.currentTimeMillis() >= sliceDeadline) {
+                        this.yieldedTicks++;
                         return;
                     }
                     if (!this.scanNextUnit()) {
@@ -181,6 +206,33 @@ public final class InventoryScanner {
                 InventoryScanner.this.plugin.getLogger().log(Level.SEVERE, "Error during inventory sweep", e);
                 this.finish();
             }
+        }
+
+        /**
+         * How many units to process this tick.
+         *
+         * <p>A task repeating every tick is itself a tick-rate probe: when the
+         * server keeps up, consecutive runs are about 50ms apart, and when it
+         * falls behind the gap grows. On a struggling server the sweep drops to a
+         * single unit per tick — it keeps making progress without adding to a load
+         * that is already too high, instead of competing for a tick the server
+         * cannot spare.
+         *
+         * <p>The measurement is of the whole tick, so it also catches the sweep
+         * making the server late; with the slice capped at a few milliseconds that
+         * is unlikely to be the cause, but backing off is the right answer either
+         * way.
+         */
+        private int budgetForThisTick(final long now) {
+            final int configured = InventoryScanner.this.config.getBatchSize();
+            if (this.lastTickAt == 0L) {
+                return configured;
+            }
+            if (now - this.lastTickAt <= (long) (EXPECTED_TICK_MILLIS * LAG_TOLERANCE)) {
+                return configured;
+            }
+            this.laggedTicks++;
+            return 1;
         }
 
         /**
@@ -208,6 +260,12 @@ public final class InventoryScanner {
             if (this.task != null) {
                 this.task.cancel();
                 this.task = null;
+            }
+            if (this.laggedTicks > 0 || this.yieldedTicks > 0) {
+                InventoryScanner.this.plugin.debug(String.format(
+                        "Sweep gave the main thread room back: %d ticks throttled for lag, "
+                                + "%d slices cut short on their time budget",
+                        this.laggedTicks, this.yieldedTicks));
             }
             this.result.complete(this.builder
                     .durationMs(System.currentTimeMillis() - this.startedAt)

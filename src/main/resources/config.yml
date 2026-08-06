@@ -15,9 +15,18 @@ scanning:
   # chunk scanning entirely (players only).
   container-interval: 60
   # Scan units processed per server tick. A unit is one player or one chunk
-  # (with everything that chunk holds). Lower it if a scan is noticeable on a
-  # very large world, raise it to finish sweeps faster.
+  # (with everything that chunk holds). Raise it to finish sweeps faster.
   batch-size: 100
+  # Hard ceiling on what one slice of a sweep may spend in a tick (milliseconds).
+  #
+  # batch-size alone cannot bound the cost, because units are not equal: one
+  # chunk may hold no container and the next a hundred. This caps the real time
+  # spent, whatever the units turn out to contain. A slice always processes at
+  # least one unit, so the sweep can never stall.
+  #
+  # The sweep also throttles itself to a single unit per tick while the server is
+  # running behind, so it never adds to a load that is already too high.
+  max-tick-time: 5
   # Maximum duration of one scan (in milliseconds). A scan that runs out of time
   # stops where it is and reports a partial result; the next one starts over.
   timeout: 30000

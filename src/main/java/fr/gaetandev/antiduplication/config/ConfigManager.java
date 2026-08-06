@@ -40,6 +40,7 @@ public final class ConfigManager {
     private int scanInterval;
     private int containerInterval;
     private int batchSize;
+    private long maxTickMillis;
     private long scanTimeout;
 
     private int uuidLength;
@@ -96,6 +97,8 @@ public final class ConfigManager {
         this.scanInterval = Math.max(1, this.config.getInt("scanning.interval", 5));
         this.containerInterval = Math.max(0, this.config.getInt("scanning.container-interval", 60));
         this.batchSize = Math.max(1, Math.min(2000, this.config.getInt("scanning.batch-size", 100)));
+        // Never allow a whole tick: the point is to stay unnoticeable.
+        this.maxTickMillis = Math.max(1L, Math.min(25L, this.config.getLong("scanning.max-tick-time", 5L)));
         this.scanTimeout = Math.max(1000L, this.config.getLong("scanning.timeout", 30000L));
 
         // UUID
@@ -237,6 +240,18 @@ public final class ConfigManager {
      */
     public int getBatchSize() {
         return this.batchSize;
+    }
+
+    /**
+     * Wall-clock ceiling for one slice of the sweep.
+     *
+     * <p>The unit count alone cannot bound the cost: one chunk may hold no
+     * container and the next a hundred. This caps what a tick actually spends,
+     * whatever the units turn out to contain. A slice always processes at least
+     * one unit, so the sweep cannot stall.
+     */
+    public long getMaxTickMillis() {
+        return this.maxTickMillis;
     }
 
     public long getScanTimeout() {
